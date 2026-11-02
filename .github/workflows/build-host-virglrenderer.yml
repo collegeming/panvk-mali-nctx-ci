@@ -52,6 +52,29 @@ jobs:
           grep -q 'mali_kbase_renderer.c' aosp/external/virglrenderer/Android.bp
           grep -q 'mali_kbase' aosp/external/virglrenderer/src/drm/drm_renderer.c
           grep -q 'ENABLE_DRM2KGSL 1' aosp/external/virglrenderer/prebuilt-intermediates/config.h
+      - name: Trim Venus sources and the unneeded host variant
+        run: |
+          set -eux
+          cd "$GITHUB_WORKSPACE/aosp/external/virglrenderer"
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('Android.bp')
+          s = p.read_text()
+          old = 'name: "libvirglrenderer",' + chr(10) + '    host_supported: true,'
+          new = 'name: "libvirglrenderer",' + chr(10) + '    host_supported: false,'
+          assert old in s
+          s = s.replace(old, new)
+          s = chr(10).join(l for l in s.splitlines() if '"src/venus/' not in l)
+          p.write_text(s)
+          c = Path('prebuilt-intermediates/config.h')
+          t = c.read_text()
+          assert '#define ENABLE_VENUS 1' in t
+          t = t.replace('#define ENABLE_VENUS 1', '/* #define ENABLE_VENUS 1 */')
+          c.write_text(t)
+          print('remaining src/venus lines:', sum('src/venus/' in l for l in s.splitlines()))
+          PY
+          grep -n 'ENABLE_VENUS' prebuilt-intermediates/config.h
+          grep -n 'name: "libvirglrenderer"' -A2 Android.bp
       - name: Build libvirglrenderer
         run: |
           set -ex
