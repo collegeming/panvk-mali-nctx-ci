@@ -62,7 +62,7 @@ jobs:
             -Dplatforms=wayland -Dglx=disabled -Degl=disabled \
             -Dgles1=disabled -Dgles2=disabled
           ninja -C build -j"$(nproc)"
-          find build -name 'libvulkan_panfrost.so*' -o -name 'libvulkan_panfrost.so'
+          find build -name 'libvulkan_panfrost.so*' -ls
           grep -R 'HAVE_PAN_KMOD_KBASE' build 2>/dev/null | head || true
       - name: Build a Vulkan compute probe
         run: |
@@ -201,7 +201,7 @@ jobs:
         run: |
           set -eux
           mkdir -p payload/opt
-          lib=$(find mesa/build -type f -name 'libvulkan_panfrost.so' | head -1)
+          lib=$(find mesa/build -name 'libvulkan_panfrost.so*' | head -1)
           test -n "$lib"
           cp "$lib" payload/opt/libvulkan_panfrost.so
           cat > payload/opt/panvk_icd.json <<'JSON'
