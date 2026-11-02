@@ -26,27 +26,6 @@ tar xzf virgl.tgz
 V=$WORK/virglrenderer-e58441fc6fa6ce73e6545882b43c8c807fe22a11
 test -f "$V/src/drm/mali_kbase_renderer.c"
 
-python3 - "$V/src/gallium/auxiliary/util/u_format.h" <<'PY'
-import sys
-from pathlib import Path
-p = Path(sys.argv[1])
-s = p.read_text()
-s = s.replace('#include "pipe/p_compiler.h"',
-              '#include <stdio.h>' + chr(10) + '#include "pipe/p_compiler.h"', 1)
-old = """   const struct util_format_description *desc = util_format_description(format);
-   assert(desc);
-   return desc->is_depth || desc->is_stencil;"""
-new = """   const struct util_format_description *desc = util_format_description(format);
-   if (!desc) {
-      fprintf(stderr, "virglrenderer: NULL format %d", (int)format);
-      return false;
-   }
-   return desc->is_depth || desc->is_stencil;"""
-assert old in s, 'format assert anchor not found'
-s = s.replace(old, new, 1)
-p.write_text(s)
-print('patched util_format_is_depth_or_stencil')
-PY
 
 curl -fsSL --retry 3 -o epoxy.tgz https://github.com/anholt/libepoxy/archive/refs/tags/1.5.10.tar.gz
 tar xzf epoxy.tgz
@@ -148,7 +127,7 @@ EOF
 
 cd "$V"
 $CC -shared -fPIC -O2 -g0 \
-  -DHAVE_CONFIG_H -D__USE_GNU -DHAVE_MEMFD_CREATE=1 -DHAVE_LINUX_UDMABUF_H=1 \
+  -DHAVE_CONFIG_H -D__USE_GNU -DHAVE_MEMFD_CREATE=1 -DHAVE_LINUX_UDMABUF_H=1 -DNDEBUG \
   -Wno-unused-parameter -Wno-pointer-sign -Wno-implicit-function-declaration \
   -include "$WORK/config.h" \
   -I"$WORK" -I"$V/src" -I"$V/src/drm" -I"$V/src/drm/drm-uapi" \
