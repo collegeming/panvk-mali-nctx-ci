@@ -115,9 +115,14 @@ if [ ! -s "$WORK/xf86drm.h" ]; then
 fi
 test -s "$WORK/xf86drm.h"
 
-cp "$HERE/drm_stub.c" "$HERE/sync_stub.c" "$HERE/cutils_stub.c" "$HERE/cpu_stub.c" "$WORK/"
-mkdir -p "$WORK/cutils"
+cp "$HERE/drm_stub.c" "$HERE/cutils_stub.c" "$HERE/cpu_stub.c" "$WORK/"
+mkdir -p "$WORK/cutils" "$WORK/log"
 cp "$HERE/properties.h" "$WORK/cutils/properties.h"
+cat > "$WORK/log/log.h" <<'EOF'
+#pragma once
+#include <android/log.h>
+#define LOG_PRI(priority, tag, ...) __android_log_print(priority, tag, __VA_ARGS__)
+EOF
 
 cd "$V"
 $CC -shared -fPIC -O2 -g0 \
@@ -131,7 +136,7 @@ $CC -shared -fPIC -O2 -g0 \
   -I"$WORK/epoxy-prefix/include" \
   -o "$OUT/libvirglrenderer.so" \
   $(cat "$WORK/sources.txt") \
-  "$WORK/drm_stub.c" "$WORK/sync_stub.c" "$WORK/cutils_stub.c" "$WORK/cpu_stub.c" \
+  "$WORK/drm_stub.c" "$WORK/cutils_stub.c" "$WORK/cpu_stub.c" \
   "$EPOXY_LIB" -lEGL -lGLESv2 -llog -ldl -lm -lz \
   -Wl,-soname,libvirglrenderer.so
 
