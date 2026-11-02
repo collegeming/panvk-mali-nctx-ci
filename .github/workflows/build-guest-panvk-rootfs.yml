@@ -275,7 +275,6 @@ jobs:
             sed -i "s/^MODULES=.*/MODULES=(virtio_pci virtio_blk virtio_net virtio_gpu ext4)/" /etc/mkinitcpio.conf
             grep -q "virtio_blk" /etc/mkinitcpio.conf
             mkinitcpio -P
-            depmod -a
             ls -la /boot
           '
           sudo cp root/boot/Image Image
