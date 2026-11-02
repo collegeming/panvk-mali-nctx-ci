@@ -27,6 +27,14 @@ jobs:
             libzstd-dev libelf-dev libvulkan-dev glslang-tools xxd aria2 zstd e2fsprogs \
             util-linux curl jq
           df -h /
+      - name: Install newer Meson in a venv
+        run: |
+          set -eux
+          python3 -m venv "$HOME/meson-venv"
+          "$HOME/meson-venv/bin/pip" install -q --upgrade pip
+          "$HOME/meson-venv/bin/pip" install -q 'meson>=1.4,<2' mako pyyaml
+          echo "$HOME/meson-venv/bin" >> "$GITHUB_PATH"
+          "$HOME/meson-venv/bin/meson" --version
       - name: Checkout experimental Mesa PanVK
         uses: actions/checkout@v4
         with:
