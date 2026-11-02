@@ -75,7 +75,7 @@ jobs:
           void main() { b.x = 0x12345678u; }
           GLSL
           glslangValidator -V payload/probe.comp -o payload/probe.spv
-          xxd -i payload/probe.spv > payload/probe_spv.h
+          (cd payload && xxd -i probe.spv > probe_spv.h)
           cat > payload/probe.c <<'C'
           #include <vulkan/vulkan.h>
           #include <stdio.h>
