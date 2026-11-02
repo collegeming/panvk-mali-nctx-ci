@@ -32,7 +32,7 @@ jobs:
           set -eux
           python3 -m venv "$HOME/meson-venv"
           "$HOME/meson-venv/bin/pip" install -q --upgrade pip
-          "$HOME/meson-venv/bin/pip" install -q 'meson>=1.4,<2' mako pyyaml
+          "$HOME/meson-venv/bin/pip" install -q 'meson>=1.4,<2' mako pyyaml packaging
           echo "$HOME/meson-venv/bin" >> "$GITHUB_PATH"
           "$HOME/meson-venv/bin/meson" --version
       - name: Checkout experimental Mesa PanVK
