@@ -281,6 +281,7 @@ jobs:
           '
           sudo cp root/boot/Image Image
           sudo cp root/boot/initramfs-linux.img initramfs-linux.img
+          sudo chmod 644 Image initramfs-linux.img
           sudo umount -l root/dev root/proc root/sys 2>/dev/null || true
           sync
           sudo umount root || { sudo umount -l root || true; sleep 2; }
