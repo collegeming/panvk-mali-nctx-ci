@@ -1,0 +1,14 @@
+name: arm64-smoke
+on:
+  workflow_dispatch:
+jobs:
+  arm:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - name: Report runner
+        run: |
+          uname -a
+          nproc
+          free -h
+          df -h /
