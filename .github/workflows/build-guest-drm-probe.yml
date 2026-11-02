@@ -1,0 +1,40 @@
+name: build-guest-drm-probe
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-guest-drm-probe.yml'
+      - 'scripts/guest-drm-probe/**'
+permissions:
+  contents: read
+concurrency:
+  group: guest-drm-probe-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - name: Checkout CI scripts
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build the virtgpu ioctl probe
+        run: |
+          set -eux
+          curl -fsSL --retry 3 -o v.tgz \
+            https://github.com/MollySophia/virglrenderer/archive/e58441fc6fa6ce73e6545882b43c8c807fe22a11.tar.gz
+          tar xzf v.tgz
+          mkdir -p out
+          cc -O2 -Wall -Wextra \
+            -I virglrenderer-e58441fc6fa6ce73e6545882b43c8c807fe22a11/src/drm/drm-uapi \
+            -o out/virtgpu-probe scripts/guest-drm-probe/virtgpu-probe.c
+          file out/virtgpu-probe
+          sha256sum out/virtgpu-probe > out/SHA256SUMS
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: guest-drm-probe-${{ github.run_id }}
+          path: out/
+          if-no-files-found: error
