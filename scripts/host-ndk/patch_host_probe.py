@@ -91,6 +91,25 @@ s = rep(s, '''   const char *opt = getenv("VKR_TEST_KBASE_NATIVE");
    if (!ret) ret = gpu_id(fd, &id);
    fprintf(stderr, "mali-probe: ret=%d id=%llx", ret, (unsigned long long)id);
    if (ret) return ret;''')
+s = rep(s, '''static int blob(struct virgl_context *v, uint32_t res, uint64_t id, uint64_t size,
+                uint32_t flags, struct virgl_context_blob *out)
+{
+   (void)res;
+   if (id) {''', '''static int blob(struct virgl_context *v, uint32_t res, uint64_t id, uint64_t size,
+                uint32_t flags, struct virgl_context_blob *out)
+{
+   fprintf(stderr, "mali-blob: res=%u id=%llu size=%llu flags=0x%x", res,
+           (unsigned long long)id, (unsigned long long)size, flags);
+   (void)res;
+   if (id) {''')
+s = rep(s, '''   if (size < 4096 || size > 65536) return -EINVAL;
+   return drm_context_get_shmem_blob((void *)v, "mali_kbase", 8, size, flags, out);''', '''   if (size < 4096 || size > 65536) {
+      fprintf(stderr, "mali-blob: bad size");
+      return -EINVAL;
+   }
+   int ret = drm_context_get_shmem_blob((void *)v, "mali_kbase", 8, size, flags, out);
+   fprintf(stderr, "mali-blob: shmem ret=%d", ret);
+   return ret;''')
 mali.write_text(s)
 
 print('host probe diagnostics patched')
