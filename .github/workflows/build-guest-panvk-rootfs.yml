@@ -279,7 +279,9 @@ jobs:
           '
           sudo cp root/boot/Image Image
           sudo cp root/boot/initramfs-linux.img initramfs-linux.img
-          sudo umount root/proc root/sys root/dev
+          sudo fuser -km root/dev root/proc root/sys 2>/dev/null || true
+          sudo umount -l root/dev root/proc root/sys 2>/dev/null || true
+          sudo umount root
           sudo umount root
           sudo e2fsck -f -y root.img || true
           qemu-img convert -f raw -O qcow2 -c root.img root.qcow2
