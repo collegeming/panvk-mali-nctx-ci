@@ -277,13 +277,14 @@ jobs:
             mkinitcpio -P
             ls -la /boot
             gpgconf --kill all || true
+            GNUPGHOME=/etc/pacman.d/gnupg gpgconf --kill all || true
           '
           sudo cp root/boot/Image Image
           sudo cp root/boot/initramfs-linux.img initramfs-linux.img
           sudo umount -l root/dev root/proc root/sys 2>/dev/null || true
           sync
-          sudo umount root
-          sudo umount root
+          sudo umount root || { sudo umount -l root || true; sleep 2; }
+          sudo umount root || { sudo umount -l root || true; sleep 2; }
           sudo e2fsck -f -y root.img || true
           qemu-img convert -f raw -O qcow2 -c root.img root.qcow2
           sha256sum root.qcow2 Image initramfs-linux.img > SHA256SUMS
