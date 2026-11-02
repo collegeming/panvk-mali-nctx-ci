@@ -1,0 +1,30 @@
+name: build-host-virglrenderer-ndk
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-host-virglrenderer-ndk.yml'
+      - 'scripts/host-ndk/**'
+permissions:
+  contents: read
+concurrency:
+  group: panvk-host-ndk-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout CI scripts
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build host libvirglrenderer with NDK
+        run: bash scripts/host-ndk/build-host-ndk.sh
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: virglrenderer-mali-ndk-${{ github.run_id }}
+          path: out/
+          if-no-files-found: error
