@@ -1,0 +1,91 @@
+name: build-host-virglrenderer
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-host-virglrenderer.yml'
+permissions:
+  contents: read
+concurrency:
+  group: panvk-host-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Free disk space
+        run: |
+          set -eux
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/local/share/powershell
+          sudo apt-get clean
+          sudo docker image prune -a -f || true
+          df -h /
+      - name: Install repo tool
+        run: |
+          set -eux
+          mkdir -p "$HOME/bin"
+          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o "$HOME/bin/repo"
+          chmod +x "$HOME/bin/repo"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          git config --global user.name "panvk-ci"
+          git config --global user.email "panvk-ci@users.noreply.github.com"
+          git config --global http.postBuffer 524288000
+      - name: Sync minimal AOSP for virglrenderer
+        run: |
+          set -eux
+          mkdir -p "$GITHUB_WORKSPACE/aosp"
+          cd "$GITHUB_WORKSPACE/aosp"
+          repo init -u https://github.com/Droid-VM/crosvm-minimal-manifest -b droidvm -m crosvm-minimal.xml --depth 1
+          repo sync -c -j8 --no-tags --optimized-fetch --force-sync
+          df -h /
+      - name: Install experimental Mali-kbase virglrenderer snapshot
+        run: |
+          set -eux
+          cd "$GITHUB_WORKSPACE"
+          curl -fsSL --retry 3 -o virglrenderer-mali.tar.gz \
+            https://github.com/MollySophia/virglrenderer/archive/e58441fc6fa6ce73e6545882b43c8c807fe22a11.tar.gz
+          rm -rf aosp/external/virglrenderer
+          mkdir -p aosp/external/virglrenderer
+          tar xzf virglrenderer-mali.tar.gz -C aosp/external/virglrenderer --strip-components=1
+          grep -q 'mali_kbase_renderer.c' aosp/external/virglrenderer/Android.bp
+          grep -q 'mali_kbase' aosp/external/virglrenderer/src/drm/drm_renderer.c
+          grep -q 'ENABLE_DRM2KGSL 1' aosp/external/virglrenderer/prebuilt-intermediates/config.h
+      - name: Build libvirglrenderer
+        run: |
+          set -eux
+          cd "$GITHUB_WORKSPACE/aosp"
+          source build/envsetup.sh
+          lunch aosp_arm64 trunk_staging eng
+          ALLOW_MISSING_DEPENDENCIES=true TARGET_BUILD_UNBUNDLED=true m libvirglrenderer -j8
+      - name: Collect artifact
+        run: |
+          set -eux
+          cd "$GITHUB_WORKSPACE/aosp"
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          mapfile -t libs < <(find out -type f -name 'libvirglrenderer.so')
+          test "${#libs[@]}" -gt 0
+          for f in "${libs[@]}"; do
+            echo "candidate: $f"
+            readelf -h "$f" | grep -E 'Machine|Class' || true
+            readelf -d "$f" | grep -E 'SONAME|NEEDED' || true
+          done
+          pick=""
+          for f in "${libs[@]}"; do
+            if readelf -h "$f" | grep -q 'AArch64'; then pick="$f"; break; fi
+          done
+          test -n "$pick"
+          echo "picked: $pick"
+          cp "$pick" "$GITHUB_WORKSPACE/out/libvirglrenderer.so"
+          cp "$GITHUB_WORKSPACE/aosp/external/virglrenderer/Android.bp" "$GITHUB_WORKSPACE/out/virglrenderer-Android.bp"
+          cp "$GITHUB_WORKSPACE/aosp/external/virglrenderer/prebuilt-intermediates/config.h" "$GITHUB_WORKSPACE/out/virglrenderer-config.h"
+          (cd "$GITHUB_WORKSPACE/out" && sha256sum libvirglrenderer.so > SHA256SUMS)
+          strings "$GITHUB_WORKSPACE/out/libvirglrenderer.so" | grep -E 'mali_kbase|VKR_TEST_KBASE|drm_renderer' | sort -u > "$GITHUB_WORKSPACE/out/mali-strings.txt" || true
+          cat "$GITHUB_WORKSPACE/out/mali-strings.txt" || true
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: virglrenderer-mali-aosp-${{ github.run_id }}
+          path: out/
+          if-no-files-found: error
