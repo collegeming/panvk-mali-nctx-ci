@@ -1,0 +1,293 @@
+name: build-guest-panvk-rootfs
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-guest-panvk-rootfs.yml'
+permissions:
+  contents: read
+concurrency:
+  group: panvk-guest-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 360
+    steps:
+      - name: Install build dependencies
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            build-essential meson ninja-build python3-mako python3-yaml pkg-config bison flex \
+            libdrm-dev libudev-dev libwayland-dev wayland-protocols libx11-dev libxext-dev \
+            libxrandr-dev libxfixes-dev libxcb1-dev libxcb-dri3-dev libxcb-present-dev \
+            libxcb-sync-dev libxcb-shm0-dev libxcb-xfixes0-dev libexpat1-dev zlib1g-dev \
+            libzstd-dev libelf-dev libvulkan-dev glslang-tools xxd aria2 zstd e2fsprogs \
+            util-linux curl jq
+          df -h /
+      - name: Checkout experimental Mesa PanVK
+        uses: actions/checkout@v4
+        with:
+          repository: MollySophia/mesa-manet
+          ref: 57e402a2edb0c67fa5302c85e506d48f086b2cd2
+          path: mesa
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Fix include names in experimental transport
+        run: |
+          set -eux
+          sed -i 's|kmod/kbase_virtio.h|kmod/mali_kbase_virtio.h|g' \
+            mesa/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c \
+            mesa/src/panfrost/vulkan/panvk_device_memory.c
+          grep -R 'kbase_virtio.h' mesa/src/panfrost | sort
+      - name: Build PanVK with kbase virtio kmod
+        run: |
+          set -eux
+          cd mesa
+          meson setup build \
+            -Dbuildtype=release -Dwerror=false \
+            -Dvulkan-drivers=panfrost -Dgallium-drivers=panfrost \
+            -Dpanfrost-kmds=kbase \
+            -Dplatforms=wayland -Dglx=disabled -Degl=disabled \
+            -Dgles1=disabled -Dgles2=disabled
+          ninja -C build -j"$(nproc)"
+          find build -name 'libvulkan_panfrost.so*' -o -name 'libvulkan_panfrost.so'
+          grep -R 'HAVE_PAN_KMOD_KBASE' build 2>/dev/null | head || true
+      - name: Build a Vulkan compute probe
+        run: |
+          set -eux
+          mkdir -p payload
+          cat > payload/probe.comp <<'GLSL'
+          #version 450
+          layout(local_size_x = 1) in;
+          layout(binding = 0) buffer B { uint x; } b;
+          void main() { b.x = 0x12345678u; }
+          GLSL
+          glslangValidator -V payload/probe.comp -o payload/probe.spv
+          xxd -i payload/probe.spv > payload/probe_spv.h
+          cat > payload/probe.c <<'C'
+          #include <vulkan/vulkan.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <string.h>
+          #include "probe_spv.h"
+          #define CK(x) do { VkResult r_ = (x); if (r_ != VK_SUCCESS) { \
+            fprintf(stderr, "%s -> %d\n", #x, (int)r_); return 1; } } while (0)
+          int main(void) {
+            VkApplicationInfo app = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
+              .apiVersion = VK_API_VERSION_1_1 };
+            VkInstanceCreateInfo ici = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+              .pApplicationInfo = &app };
+            VkInstance inst; CK(vkCreateInstance(&ici, NULL, &inst));
+            uint32_t n = 0; CK(vkEnumeratePhysicalDevices(inst, &n, NULL));
+            printf("physical devices: %u\n", n);
+            if (!n) return 2;
+            VkPhysicalDevice *pds = malloc(n * sizeof(*pds));
+            CK(vkEnumeratePhysicalDevices(inst, &n, pds));
+            VkPhysicalDeviceProperties props; vkGetPhysicalDeviceProperties(pds[0], &props);
+            printf("device: %s api=%u.%u.%u\n", props.deviceName,
+              VK_VERSION_MAJOR(props.apiVersion), VK_VERSION_MINOR(props.apiVersion),
+              VK_VERSION_PATCH(props.apiVersion));
+            uint32_t qn = 0; vkGetPhysicalDeviceQueueFamilyProperties(pds[0], &qn, NULL);
+            VkQueueFamilyProperties *q = malloc(qn * sizeof(*q));
+            vkGetPhysicalDeviceQueueFamilyProperties(pds[0], &qn, q);
+            uint32_t qi = UINT32_MAX;
+            for (uint32_t i = 0; i < qn; i++)
+              if (q[i].queueFlags & VK_QUEUE_COMPUTE_BIT) { qi = i; break; }
+            if (qi == UINT32_MAX) { fprintf(stderr, "no compute queue\n"); return 3; }
+            float prio = 1.0f;
+            VkDeviceQueueCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+              .queueFamilyIndex = qi, .queueCount = 1, .pQueuePriorities = &prio };
+            VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+              .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci };
+            VkDevice dev; CK(vkCreateDevice(pds[0], &dci, NULL, &dev));
+            VkQueue queue; vkGetDeviceQueue(dev, qi, 0, &queue);
+            VkBufferCreateInfo bci = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+              .size = 4, .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+              .sharingMode = VK_SHARING_MODE_EXCLUSIVE };
+            VkBuffer buf; CK(vkCreateBuffer(dev, &bci, NULL, &buf));
+            VkMemoryRequirements req; vkGetBufferMemoryRequirements(dev, buf, &req);
+            VkPhysicalDeviceMemoryProperties mp; vkGetPhysicalDeviceMemoryProperties(pds[0], &mp);
+            uint32_t mi = UINT32_MAX;
+            for (uint32_t i = 0; i < mp.memoryTypeCount; i++)
+              if ((req.memoryTypeBits & (1u << i)) &&
+                  (mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
+                  (mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+                mi = i; break;
+              }
+            if (mi == UINT32_MAX) { fprintf(stderr, "no host-visible coherent memory\n"); return 4; }
+            VkMemoryAllocateInfo mai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+              .allocationSize = req.size, .memoryTypeIndex = mi };
+            VkDeviceMemory mem; CK(vkAllocateMemory(dev, &mai, NULL, &mem));
+            CK(vkBindBufferMemory(dev, buf, mem, 0));
+            void *ptr; CK(vkMapMemory(dev, mem, 0, 4, 0, &ptr)); memset(ptr, 0, 4);
+            VkShaderModuleCreateInfo smci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+              .codeSize = probe_spv_len, .pCode = (const uint32_t *)probe_spv };
+            VkShaderModule sm; CK(vkCreateShaderModule(dev, &smci, NULL, &sm));
+            VkDescriptorSetLayoutBinding dslb = { .binding = 0,
+              .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1,
+              .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT };
+            VkDescriptorSetLayoutCreateInfo dslci = {
+              .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+              .bindingCount = 1, .pBindings = &dslb };
+            VkDescriptorSetLayout dsl; CK(vkCreateDescriptorSetLayout(dev, &dslci, NULL, &dsl));
+            VkPipelineLayoutCreateInfo plci = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+              .setLayoutCount = 1, .pSetLayouts = &dsl };
+            VkPipelineLayout pl; CK(vkCreatePipelineLayout(dev, &plci, NULL, &pl));
+            VkPipelineShaderStageCreateInfo stage = {
+              .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+              .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = sm, .pName = "main" };
+            VkComputePipelineCreateInfo cpci = {
+              .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+              .stage = stage, .layout = pl };
+            VkPipeline pipe; CK(vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &cpci, NULL, &pipe));
+            VkDescriptorPoolSize dps = { .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+              .descriptorCount = 1 };
+            VkDescriptorPoolCreateInfo dpci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+              .maxSets = 1, .poolSizeCount = 1, .pPoolSizes = &dps };
+            VkDescriptorPool dp; CK(vkCreateDescriptorPool(dev, &dpci, NULL, &dp));
+            VkDescriptorSetAllocateInfo dsai = {
+              .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+              .descriptorPool = dp, .descriptorSetCount = 1, .pSetLayouts = &dsl };
+            VkDescriptorSet ds; CK(vkAllocateDescriptorSets(dev, &dsai, &ds));
+            VkDescriptorBufferInfo dbi = { .buffer = buf, .offset = 0, .range = 4 };
+            VkWriteDescriptorSet wds = { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+              .dstSet = ds, .dstBinding = 0, .descriptorCount = 1,
+              .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &dbi };
+            vkUpdateDescriptorSets(dev, 1, &wds, 0, NULL);
+            VkCommandPoolCreateInfo cpi = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+              .queueFamilyIndex = qi };
+            VkCommandPool cp; CK(vkCreateCommandPool(dev, &cpi, NULL, &cp));
+            VkCommandBufferAllocateInfo cbai = {
+              .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = cp,
+              .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1 };
+            VkCommandBuffer cb; CK(vkAllocateCommandBuffers(dev, &cbai, &cb));
+            VkCommandBufferBeginInfo cbbi = {
+              .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+              .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
+            CK(vkBeginCommandBuffer(cb, &cbbi));
+            vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
+            vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pl, 0, 1, &ds, 0, NULL);
+            vkCmdDispatch(cb, 1, 1, 1);
+            CK(vkEndCommandBuffer(cb));
+            VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+            VkFence fence; CK(vkCreateFence(dev, &fci, NULL, &fence));
+            VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+              .commandBufferCount = 1, .pCommandBuffers = &cb };
+            CK(vkQueueSubmit(queue, 1, &si, fence));
+            CK(vkWaitForFences(dev, 1, &fence, VK_TRUE, 10000000000ull));
+            CK(vkDeviceWaitIdle(dev));
+            uint32_t val; memcpy(&val, ptr, 4);
+            printf("result=0x%08x expected=0x12345678 %s\n", val,
+              val == 0x12345678u ? "PASS" : "FAIL");
+            vkUnmapMemory(dev, mem);
+            return val == 0x12345678u ? 0 : 5;
+          }
+          C
+          cc -O2 -Wall -Wextra -o payload/panvk_compute_probe payload/probe.c $(pkg-config --cflags --libs vulkan)
+          ls -la payload
+      - name: Stage guest payload
+        run: |
+          set -eux
+          mkdir -p payload/opt
+          lib=$(find mesa/build -type f -name 'libvulkan_panfrost.so' | head -1)
+          test -n "$lib"
+          cp "$lib" payload/opt/libvulkan_panfrost.so
+          cat > payload/opt/panvk_icd.json <<'JSON'
+          {
+            "file_format_version": "1.0.0",
+            "ICD": {
+              "library_path": "/opt/panvk/libvulkan_panfrost.so",
+              "api_version": "1.3.0"
+            }
+          }
+          JSON
+          cp payload/panvk_compute_probe payload/opt/
+          cp payload/probe.comp payload/probe.spv payload/opt/ || true
+          readelf -d payload/opt/libvulkan_panfrost.so | grep -E 'NEEDED|SONAME' || true
+          strings payload/opt/libvulkan_panfrost.so | grep -E 'PANVK_KBASE_VIRTIO|kbase virtio' | head || true
+      - name: Build Arch Linux ARM root filesystem
+        run: |
+          set -eux
+          mkdir -p rootwork
+          cd rootwork
+          aria2c -x8 -s8 -q -o ArchLinuxARM-aarch64-latest.tar.gz \
+            http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz
+          truncate -s 10G root.img
+          mkfs.ext4 -F -L archroot root.img
+          mkdir -p root
+          sudo mount -o loop root.img root
+          sudo tar -xpf ArchLinuxARM-aarch64-latest.tar.gz -C root
+          sudo mkdir -p root/dev root/proc root/sys root/opt/panvk
+          sudo mount --bind /dev root/dev
+          sudo mount -t proc proc root/proc
+          sudo mount -t sysfs sysfs root/sys
+          sudo cp /etc/resolv.conf root/etc/resolv.conf
+          sudo cp ../payload/opt/* root/opt/panvk/
+          sudo chmod 755 root/opt/panvk/panvk_compute_probe
+          sudo mkdir -p root/root/.ssh
+          printf '%s\n' "$GUEST_AUTHORIZED_KEY" | sudo tee root/root/.ssh/authorized_keys >/dev/null
+          sudo chmod 700 root/root/.ssh
+          sudo chmod 600 root/root/.ssh/authorized_keys
+          sudo chroot root /bin/bash -euxc '
+            pacman-key --init
+            pacman-key --populate archlinuxarm
+            pacman -Syu --noconfirm
+            pacman -S --noconfirm --needed openssh vulkan-tools libdrm mkinitcpio linux-aarch64 \
+              systemd-libs wayland libxcb libx11 libxext libxrandr libxfixes libzstd libelf expat zlib
+            pacman -Q linux-aarch64
+            test -e /boot/Image
+            mkdir -p /etc/ssh/sshd_config.d
+            printf "%s\n" "PermitRootLogin yes" "PasswordAuthentication no" "PubkeyAuthentication yes" \
+              > /etc/ssh/sshd_config.d/10-root.conf
+            chmod 700 /root/.ssh
+            chmod 600 /root/.ssh/authorized_keys
+            mkdir -p /etc/systemd/network
+            cat > /etc/systemd/network/20-panvk.network <<NETEOF
+          [Match]
+          Name=eth0 en*
+          [Network]
+          Address=192.168.211.131/24
+          Gateway=192.168.211.1
+          DNS=1.1.1.1
+          NETEOF
+            systemctl enable systemd-networkd systemd-resolved sshd
+            mkdir -p /etc/systemd/system/serial-getty@ttyS0.service.d
+            cat > /etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf <<TTYEOF
+          [Service]
+          ExecStart=
+          ExecStart=-/sbin/agetty --autologin root --noclear %I $TERM
+          TTYEOF
+            systemctl enable serial-getty@ttyS0
+            sed -i "s/^MODULES=.*/MODULES=(virtio_pci virtio_blk virtio_net virtio_gpu ext4)/" /etc/mkinitcpio.conf
+            grep -q "virtio_blk" /etc/mkinitcpio.conf
+            mkinitcpio -P
+            depmod -a
+            ls -la /boot
+          '
+          sudo cp root/boot/Image Image
+          sudo cp root/boot/initramfs-linux.img initramfs-linux.img
+          sudo umount root/proc root/sys root/dev
+          sudo umount root
+          sudo e2fsck -f -y root.img || true
+          zstd -T0 -3 -q -f root.img -o root.img.zst
+          sha256sum root.img.zst Image initramfs-linux.img > SHA256SUMS
+          ls -la
+          df -h /
+        env:
+          GUEST_AUTHORIZED_KEY: ${{ vars.GUEST_AUTHORIZED_KEY }}
+      - name: Upload guest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: panvk-guest-rootfs-${{ github.run_id }}
+          path: |
+            rootwork/root.img.zst
+            rootwork/Image
+            rootwork/initramfs-linux.img
+            rootwork/SHA256SUMS
+            payload/opt/libvulkan_panfrost.so
+            payload/opt/panvk_icd.json
+            payload/opt/panvk_compute_probe
+          if-no-files-found: error
