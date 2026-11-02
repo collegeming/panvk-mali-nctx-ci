@@ -276,11 +276,12 @@ jobs:
             grep -q "virtio_blk" /etc/mkinitcpio.conf
             mkinitcpio -P
             ls -la /boot
+            gpgconf --kill all || true
           '
           sudo cp root/boot/Image Image
           sudo cp root/boot/initramfs-linux.img initramfs-linux.img
-          sudo fuser -km root/dev root/proc root/sys 2>/dev/null || true
           sudo umount -l root/dev root/proc root/sys 2>/dev/null || true
+          sync
           sudo umount root
           sudo umount root
           sudo e2fsck -f -y root.img || true
