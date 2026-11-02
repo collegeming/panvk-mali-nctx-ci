@@ -25,6 +25,7 @@ curl -fsSL --retry 3 -o virgl.tgz https://github.com/MollySophia/virglrenderer/a
 tar xzf virgl.tgz
 V=$WORK/virglrenderer-e58441fc6fa6ce73e6545882b43c8c807fe22a11
 test -f "$V/src/drm/mali_kbase_renderer.c"
+python3 "$HERE/patch_host_probe.py" "$V"
 
 
 curl -fsSL --retry 3 -o epoxy.tgz https://github.com/anholt/libepoxy/archive/refs/tags/1.5.10.tar.gz
