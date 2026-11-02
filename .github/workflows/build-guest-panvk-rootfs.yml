@@ -233,7 +233,9 @@ jobs:
           sudo mount --bind /dev root/dev
           sudo mount -t proc proc root/proc
           sudo mount -t sysfs sysfs root/sys
-          sudo cp /etc/resolv.conf root/etc/resolv.conf
+          sudo rm -f root/etc/resolv.conf
+          printf 'nameserver 1.1.1.1\n' | sudo tee root/etc/resolv.conf >/dev/null
+          printf 'nameserver 8.8.8.8\n' | sudo tee -a root/etc/resolv.conf >/dev/null
           sudo cp ../payload/opt/* root/opt/panvk/
           sudo chmod 755 root/opt/panvk/panvk_compute_probe
           sudo mkdir -p root/root/.ssh
