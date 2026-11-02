@@ -54,11 +54,11 @@ jobs:
           grep -q 'ENABLE_DRM2KGSL 1' aosp/external/virglrenderer/prebuilt-intermediates/config.h
       - name: Build libvirglrenderer
         run: |
-          set -eux
+          set -ex
           cd "$GITHUB_WORKSPACE/aosp"
           source build/envsetup.sh
           lunch aosp_arm64 trunk_staging eng
-          ALLOW_MISSING_DEPENDENCIES=true TARGET_BUILD_UNBUNDLED=true m libvirglrenderer -j8
+          ALLOW_MISSING_DEPENDENCIES=true TARGET_BUILD_UNBUNDLED=true m libvirglrenderer -j4
       - name: Collect artifact
         run: |
           set -eux
