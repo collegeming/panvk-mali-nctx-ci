@@ -57,7 +57,7 @@ jobs:
           cd mesa
           meson setup build \
             -Dbuildtype=release -Dwerror=false \
-            -Dvulkan-drivers=panfrost -Dgallium-drivers=panfrost \
+            -Dvulkan-drivers=panfrost -Dgallium-drivers= \
             -Dpanfrost-kmds=kbase \
             -Dplatforms=wayland -Dglx=disabled -Degl=disabled \
             -Dgles1=disabled -Dgles2=disabled
