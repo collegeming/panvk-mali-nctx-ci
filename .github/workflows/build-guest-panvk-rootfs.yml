@@ -25,7 +25,8 @@ jobs:
             libxrandr-dev libxfixes-dev libxcb1-dev libxcb-dri3-dev libxcb-present-dev \
             libxcb-sync-dev libxcb-shm0-dev libxcb-xfixes0-dev libexpat1-dev zlib1g-dev \
             libzstd-dev libelf-dev libvulkan-dev glslang-tools xxd aria2 zstd e2fsprogs \
-            util-linux curl jq libllvmspirvlib-18-dev qemu-utils
+            util-linux curl jq libllvmspirvlib-18-dev qemu-utils \
+            libclang-18-dev libclang-cpp18-dev libclang-common-18-dev
           df -h /
       - name: Install newer Meson in a venv
         run: |
