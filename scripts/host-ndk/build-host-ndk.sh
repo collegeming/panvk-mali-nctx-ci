@@ -65,7 +65,7 @@ c_link_args = ['-fPIC']
 EOF
 
 PKG_CONFIG_LIBDIR=$WORK/pc meson setup "$E/build" "$E" --cross-file "$WORK/cross.txt" \
-  --prefix="$WORK/epoxy-prefix" -Dglx=no -Degl=yes -Dx11=false -Dtests=false -Ddocs=false
+  --prefix="$WORK/epoxy-prefix" -Ddefault_library=static -Dglx=no -Degl=yes -Dx11=false -Dtests=false -Ddocs=false
 ninja -C "$E/build"
 ninja -C "$E/build" install
 EPOXY_LIB=$(find "$WORK/epoxy-prefix" -name 'libepoxy.a' | head -1)
