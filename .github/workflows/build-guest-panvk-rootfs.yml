@@ -222,6 +222,7 @@ jobs:
           set -eux
           mkdir -p rootwork
           cd rootwork
+          git clone --depth 1 -b droidvm https://github.com/Droid-VM/droidvm-guest-additions.git additions
           aria2c -x8 -s8 -q -o ArchLinuxARM-aarch64-latest.tar.gz \
             http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz
           truncate -s 10G root.img
@@ -229,7 +230,8 @@ jobs:
           mkdir -p root
           sudo mount -o loop root.img root
           sudo tar -xpf ArchLinuxARM-aarch64-latest.tar.gz -C root
-          sudo mkdir -p root/dev root/proc root/sys root/opt/panvk
+          sudo mkdir -p root/opt root/dev root/proc root/sys root/opt/panvk
+          sudo cp -r additions root/opt/droidvm-guest-additions
           sudo mount --bind /dev root/dev
           sudo mount -t proc proc root/proc
           sudo mount -t sysfs sysfs root/sys
@@ -247,9 +249,17 @@ jobs:
             pacman-key --populate archlinuxarm
             pacman -Syu --noconfirm
             pacman -S --noconfirm --needed openssh vulkan-tools libdrm mkinitcpio linux-aarch64 \
-              systemd-libs wayland libxcb libx11 libxext libxrandr libxfixes zstd libelf expat zlib
+              systemd-libs wayland libxcb libx11 libxext libxrandr libxfixes zstd libelf expat zlib \
+              base-devel linux-aarch64-headers
             pacman -Q linux-aarch64
             test -e /boot/Image
+            kver=$(ls /usr/lib/modules | head -1)
+            make -C /opt/droidvm-guest-additions KDIR=/usr/lib/modules/$kver/build
+            mkdir -p /usr/lib/modules/$kver/updates/dkms
+            cp /opt/droidvm-guest-additions/gunyah_guest/gunyah_guest.ko /usr/lib/modules/$kver/updates/dkms/
+            cp /opt/droidvm-guest-additions/virtio_gpu/virtio-gpu.ko /usr/lib/modules/$kver/updates/dkms/
+            rm -f /usr/lib/modules/$kver/kernel/drivers/gpu/drm/virtio/virtio_gpu.ko
+            depmod "$kver"
             mkdir -p /etc/ssh/sshd_config.d
             printf "%s\n" "PermitRootLogin yes" "PasswordAuthentication no" "PubkeyAuthentication yes" \
               > /etc/ssh/sshd_config.d/10-root.conf
@@ -272,7 +282,7 @@ jobs:
           ExecStart=-/sbin/agetty --autologin root --noclear %I linux
           TTYEOF
             systemctl enable serial-getty@ttyS0
-            sed -i "s/^MODULES=.*/MODULES=(virtio_pci virtio_blk virtio_net virtio_gpu ext4)/" /etc/mkinitcpio.conf
+            sed -i "s/^MODULES=.*/MODULES=(virtio_pci virtio_blk virtio_net virtio_gpu gunyah_guest ext4)/" /etc/mkinitcpio.conf
             grep -q "virtio_blk" /etc/mkinitcpio.conf
             mkinitcpio -P
             ls -la /boot
