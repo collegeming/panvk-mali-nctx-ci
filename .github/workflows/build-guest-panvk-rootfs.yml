@@ -223,6 +223,7 @@ jobs:
           mkdir -p rootwork
           cd rootwork
           git clone --depth 1 -b droidvm https://github.com/Droid-VM/droidvm-guest-additions.git additions
+          sed -i 's/struct drm_atomic_state \*state/struct drm_atomic_commit *state/g' additions/virtio_gpu/virtgpu_display.c
           aria2c -x8 -s8 -q -o ArchLinuxARM-aarch64-latest.tar.gz \
             http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz
           truncate -s 10G root.img
