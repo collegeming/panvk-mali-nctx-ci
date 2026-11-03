@@ -110,6 +110,34 @@ s = rep(s, '''   if (size < 4096 || size > 65536) return -EINVAL;
    int ret = drm_context_get_shmem_blob((void *)v, "mali_kbase", 8, size, flags, out);
    fprintf(stderr, "mali-blob: shmem ret=%d", ret);
    return ret;''')
+# Diagnose the GPU-properties RPC path: it is the first command a guest
+# context sends, and it fails for every PanVK process after the first one.
+s = rep(s, '''   if (hdr->cmd == 9) {
+      struct kbase_ioctl_get_gpuprops p = {0};
+      int n = ioctl(base->fd, KBASE_IOCTL_GET_GPUPROPS, &p);
+      if (n <= 0 || n > 65536) { r->status = -EIO; return 0; }''', '''   if (hdr->cmd == 9) {
+      struct kbase_ioctl_get_gpuprops p = {0};
+      int n = ioctl(base->fd, KBASE_IOCTL_GET_GPUPROPS, &p);
+      fprintf(stderr, "mali-props: fd=%d n=%d errno=%d req_off=%u req_len=%u size_out=%u\\n",
+              base->fd, n, errno, q->offset, q->size, p.size);
+      if (n <= 0 || n > 65536) { r->status = -EIO; return 0; }''')
+s = rep(s, '''   if (!base->shmem) return -EINVAL;
+   struct kb_rsp *r = drm_context_rsp(base, hdr, sizeof(*r));
+   if (!r) return -EINVAL;''', '''   if (!base->shmem) {
+      fprintf(stderr, "mali-cmd: fd=%d cmd=%u no shmem\\n", base->fd, hdr->cmd);
+      return -EINVAL;
+   }
+   struct kb_rsp *r = drm_context_rsp(base, hdr, sizeof(*r));
+   if (!r) {
+      fprintf(stderr, "mali-cmd: fd=%d cmd=%u no rsp (rsp_off=%u len=%u)\\n",
+              base->fd, hdr->cmd, hdr->rsp_off, hdr->len);
+      return -EINVAL;
+   }''')
+s = rep(s, '''   if (handshake(fd, &ver) || gpu_id(fd, &c->gpu_id)) goto fail;''', '''   int hs_ret = handshake(fd, &ver);
+   int id_ret = hs_ret ? hs_ret : gpu_id(fd, &c->gpu_id);
+   fprintf(stderr, "mali-create: fd=%d handshake=%d gpu_id=%d gpu=0x%llx errno=%d\\n",
+           fd, hs_ret, id_ret, (unsigned long long)c->gpu_id, errno);
+   if (hs_ret || id_ret) goto fail;''')
 mali.write_text(s)
 
 print('host probe diagnostics patched')
