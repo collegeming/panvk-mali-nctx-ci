@@ -1,0 +1,329 @@
+name: build-crosvm-panvk
+
+# Android arm64 crosvm for the PanVK/Mali native-context VM, built from
+# collegeming/crosvm panvk-nctx-blobfix (host-visible blob BAR mapping fix).
+# The virglrenderer shipped in the same artifact is the Mali kbase fork built
+# by scripts/host-ndk/build-host-ndk.sh, so crosvm is linked against exactly
+# the backend it runs with.
+
+on:
+  workflow_dispatch:
+    inputs:
+      crosvm_ref:
+        description: crosvm ref to build
+        required: false
+        default: panvk-nctx-blobfix
+  push:
+    branches: [ci/crosvm-panvk]
+    paths:
+      - '.github/workflows/build-crosvm-panvk.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crosvm-panvk-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CROSVM_REPOSITORY: collegeming/crosvm
+      CROSVM_REF: ${{ github.event.inputs.crosvm_ref || 'panvk-nctx-blobfix' }}
+      MINIJAIL_COMMIT: 8330e01d0fd55dfe505890eb5f829b77ac4ca8cb
+      RUSTUP_TOOLCHAIN: 1.90.0
+      CARGO_TERM_COLOR: never
+      CARGO_BUILD_JOBS: '4'
+      CROSVM_USE_SYSTEM_VIRGLRENDERER: '1'
+      CROSVM_USE_SYSTEM_MINIGBM: '1'
+      PKG_CONFIG_ALLOW_CROSS: '1'
+    steps:
+      - name: Checkout CI helpers
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Checkout crosvm
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.CROSVM_REPOSITORY }}
+          ref: ${{ env.CROSVM_REF }}
+          path: source
+          persist-credentials: false
+
+      - name: Checkout minijail
+        uses: actions/checkout@v4
+        with:
+          repository: google/minijail
+          ref: ${{ env.MINIJAIL_COMMIT }}
+          path: minijail
+          persist-credentials: false
+
+      - name: Checkout libcap
+        uses: actions/checkout@v4
+        with:
+          repository: mhiramat/libcap
+          ref: 8c67abc3f5cfa8310dae21e5db464fd990cb71a2
+          path: libcap-source
+          persist-credentials: false
+
+      - name: Checkout libffi
+        uses: actions/checkout@v4
+        with:
+          repository: libffi/libffi
+          ref: 3d0ce1e6fcf19f853894862abcbac0ae78a7be60
+          path: libffi-source
+          persist-credentials: false
+
+      - name: Checkout wayland
+        uses: actions/checkout@v4
+        with:
+          repository: wayland-mirror/wayland
+          ref: b2649cb3ee6bd70828a17e50beb16591e6066288
+          path: wayland-source
+          persist-credentials: false
+
+      - name: Restore cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: source -> target
+          key: crosvm-panvk
+          cache-on-failure: true
+
+      - name: Record source pin
+        run: |
+          set -eux
+          git -C source rev-parse HEAD | tee source-commit.txt
+          git -C source log -1 --oneline
+          test -f source/third_party/minijail/rust/minijail/Cargo.toml
+          test "$(git -C minijail rev-parse HEAD)" = "$MINIJAIL_COMMIT"
+
+      - name: Install build tools and Android toolchain
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            meson ninja-build pkg-config libclang-dev \
+            libwayland-dev wayland-protocols libcap-dev \
+            autoconf automake libtool
+          mkdir -p work out
+          if [ ! -f work/android-ndk-r27c-linux.zip ]; then
+            curl -fsSL --retry 3 -o work/android-ndk-r27c-linux.zip \
+              https://dl.google.com/android/repository/android-ndk-r27c-linux.zip
+          fi
+          printf '%s  %s\n' 090e8083a715fdb1a3e402d0763c388abb03fb4e work/android-ndk-r27c-linux.zip | sha1sum -c -
+          if [ ! -d work/ndk/android-ndk-r27c ]; then
+            unzip -q work/android-ndk-r27c-linux.zip -d work/ndk
+          fi
+          NDK="$PWD/work/ndk/android-ndk-r27c"
+          grep -q '27.2.12479018' "$NDK/source.properties"
+          printf 'ANDROID_NDK_HOME=%s\nTC=%s\n' "$NDK" "$NDK/toolchains/llvm/prebuilt/linux-x86_64" >> "$GITHUB_ENV"
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal \
+            --target aarch64-linux-android --target aarch64-unknown-none-softfloat
+          rustup target add --toolchain "$RUSTUP_TOOLCHAIN" aarch64-unknown-none-softfloat
+          rustc +"$RUSTUP_TOOLCHAIN" --version
+
+      - name: Build host virglrenderer (Mali kbase fork, NDK)
+        run: bash scripts/host-ndk/build-host-ndk.sh
+
+      - name: Create virglrenderer pkg-config
+        shell: bash
+        run: |
+          set -euxo pipefail
+          VIRGL="$PWD/work/virglrenderer-e58441fc6fa6ce73e6545882b43c8c807fe22a11"
+          test -f "$VIRGL/src/virglrenderer.h"
+          test -f "$PWD/out/libvirglrenderer.so"
+          mkdir -p native-prefix/lib/pkgconfig
+          cat > native-prefix/lib/pkgconfig/virglrenderer.pc <<EOF
+          prefix=$VIRGL
+          libdir=$PWD/out
+          includedir=\${prefix}/src
+
+          Name: virglrenderer
+          Description: virglrenderer (Mali kbase native-context fork)
+          Version: 1.0.0
+          Libs: -L\${libdir} -lvirglrenderer
+          Cflags: -I\${includedir} -DVIRGL_RENDERER_UNSTABLE_APIS
+          EOF
+          cat native-prefix/lib/pkgconfig/virglrenderer.pc
+          PKG_CONFIG_PATH="$PWD/native-prefix/lib/pkgconfig" pkg-config --modversion virglrenderer --libs --cflags
+
+      - name: Build Android native libraries and headers
+        shell: bash
+        run: |
+          set -euxo pipefail
+          PREFIX="$PWD/native-prefix"
+          mkdir -p native-libs native-headers/sys
+          export CC="$TC/bin/aarch64-linux-android33-clang"
+          export CXX="$TC/bin/aarch64-linux-android33-clang++"
+          export AR="$TC/bin/llvm-ar"
+          export RANLIB="$TC/bin/llvm-ranlib"
+          make -C libcap-source/libcap -j4 libcap.a CC="$CC" BUILD_CC=gcc BUILD_CFLAGS=-O2 AR="$AR" RANLIB="$RANLIB" BUILD_GPERF=no
+          cp libcap-source/libcap/libcap.a native-libs/
+          cp /usr/include/sys/capability.h native-headers/sys/
+          cp /usr/include/wayland*.h native-headers/
+          BUILTINS="$($CC -print-libgcc-file-name)"
+          test -f "$BUILTINS"
+          cp "$BUILTINS" native-libs/libndk-builtins.a
+          mkdir -p downloads/libffi extracted/libffi
+          if [ ! -f downloads/libffi/libffi.tar.gz ]; then
+            curl -fsSL --retry 3 -o downloads/libffi/libffi.tar.gz \
+              https://github.com/libffi/libffi/releases/download/v3.4.6/libffi-3.4.6.tar.gz
+          fi
+          printf '%s  %s\n' b0dea9df23c863a7a50e825440f3ebffabd65df1497108e5d437747843895a4e downloads/libffi/libffi.tar.gz | sha256sum -c -
+          tar -xf downloads/libffi/libffi.tar.gz -C extracted/libffi
+          mkdir -p libffi-build
+          (cd libffi-build && ../extracted/libffi/libffi-3.4.6/configure --host=aarch64-linux-android --prefix="$PREFIX" --disable-shared --enable-static --with-pic && make -j4 && make install)
+          printf "[binaries]\nc = '%s'\ncpp = '%s'\nar = '%s'\nstrip = '%s'\npkg-config = '/usr/bin/pkg-config'\n[properties]\npkg_config_libdir = '%s/lib/pkgconfig'\n[host_machine]\nsystem = 'android'\ncpu_family = 'aarch64'\ncpu = 'aarch64'\nendian = 'little'\n" "$CC" "$CXX" "$AR" "$TC/bin/llvm-strip" "$PREFIX" > wayland-cross.ini
+          meson setup wayland-build wayland-source --cross-file wayland-cross.ini --prefix "$PREFIX" --default-library static -Dscanner=false -Dtests=false -Ddocumentation=false -Ddtd_validation=false
+          ninja -C wayland-build src/libwayland-client.a
+          cp wayland-build/src/libwayland-client.a "$PREFIX/lib/libffi.a" native-libs/
+          ls -l native-libs native-headers
+
+      - name: Build DroidVM Gunyah boot shim
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ( cd source/droidvm-shim && cargo +"$RUSTUP_TOOLCHAIN" build --release --target aarch64-unknown-none-softfloat )
+          "$TC/bin/llvm-objcopy" -O binary \
+            source/droidvm-shim/target/aarch64-unknown-none-softfloat/release/droidvm-shim \
+            source/hypervisor/src/gunyah/shim.bin
+          ls -l source/hypervisor/src/gunyah/shim.bin
+
+      - name: Patch crosvm for stub-free Android NDK build
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 -I - <<'PY'
+          import re
+          from pathlib import Path
+
+          def sub(path, old, new, count=1):
+              p = Path(path)
+              s = p.read_text()
+              assert s.count(old) == count, (path, s.count(old), old[:80])
+              p.write_text(s.replace(old, new))
+
+          # The fork carries rand 0.9 calls while Cargo.lock pins rand 0.8.
+          sub('source/devices/src/virtio/rng.rs', 'rand::rng()', 'rand::thread_rng()')
+          sub('source/aarch64/src/fdt.rs', 'rand::rng()', 'rand::thread_rng()', 2)
+
+          # Only reached from the audio-gated constructor; keep it out of a build
+          # that has no virtio-snd at all.
+          p = Path('source/src/crosvm/sys/linux/device_helpers.rs')
+          s = p.read_text()
+          old = '/// See `snd_helper` for why the backend cannot simply stay here.\nfn create_unprivileged_virtio_snd_device('
+          assert s.count(old) == 1
+          p.write_text(s.replace(old, '/// See `snd_helper` for why the backend cannot simply stay here.\n#[cfg(feature = "audio")]\nfn create_unprivileged_virtio_snd_device('))
+
+          # libprocessgroup is a platform library, not an NDK stub one. Resolve it
+          # at runtime, and only when task profiles are actually requested.
+          p = Path('source/src/crosvm/sys/linux/android.rs')
+          s = p.read_text()
+          start = s.index('#[link(name = "processgroup")]')
+          end = s.index('// Apply the listed task profiles', start)
+          s = s[:start] + s[end:]
+          old = '    let owned: Vec<CString> = profiles'
+          assert s.count(old) == 1
+          s = s.replace(old, '''    // Standalone NDK binaries must resolve this optional platform API at runtime.
+              // Empty profiles retain their existing early return; requested profiles fail closed.
+              let handle = unsafe { libc::dlopen(b"libprocessgroup.so\\0".as_ptr().cast(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
+              if handle.is_null() {
+                  return Err(anyhow!("libprocessgroup.so unavailable for requested task profiles"));
+              }
+              let symbol = unsafe { libc::dlsym(handle, b"android_set_process_profiles\\0".as_ptr().cast()) };
+              if symbol.is_null() {
+                  unsafe { libc::dlclose(handle); }
+                  return Err(anyhow!("android_set_process_profiles unavailable for requested task profiles"));
+              }
+              type SetProfiles = unsafe extern "C" fn(libc::uid_t, libc::pid_t, libc::size_t, *const *const libc::c_char) -> bool;
+              let android_set_process_profiles: SetProfiles = unsafe { std::mem::transmute(symbol) };
+          ''' + old)
+          old = '        if android_set_process_profiles(libc::getuid(), libc::getpid(), ptrs.len(), ptrs.as_ptr()) {'
+          assert s.count(old) == 1
+          s = s.replace(old, '        let success = android_set_process_profiles(libc::getuid(), libc::getpid(), ptrs.len(), ptrs.as_ptr());\n        libc::dlclose(handle);\n        if success {')
+          p.write_text(s)
+
+          # __android_log_close is not in the NDK stub liblog. Children log to
+          # stderr through the public logger API instead of inheriting a dead socket.
+          p = Path('source/base/src/sys/linux/android/syslog.rs')
+          s = p.read_text()
+          old = '    fn __android_log_close();'
+          assert s.count(old) == 1
+          s = s.replace(old, '    fn __android_log_set_logger(logger: Option<unsafe extern "C" fn(*const __android_log_message)>);\n    fn __android_log_stderr_logger(message: *const __android_log_message);')
+          old = '        unsafe { __android_log_close() };'
+          assert s.count(old) == 1
+          s = s.replace(old, '        // Public API30+: child logs use stderr, never the stale inherited logd socket.\n        unsafe { __android_log_set_logger(Some(__android_log_stderr_logger)) };')
+          p.write_text(s)
+
+          # No libwayland-client.so on an Android target: link the real static
+          # archive (and its private deps) built in the previous step.
+          sub('source/gpu_display/build.rs',
+              'println!("cargo:rustc-link-lib=dylib=wayland-client");',
+              'println!("cargo:rustc-link-lib=static=wayland-client");\n    println!("cargo:rustc-link-lib=static=ffi");\n    println!("cargo:rustc-link-lib=static=ndk-builtins");')
+
+          # minijail-sys invents a GCC prefix; point its make at the genuine NDK
+          # tools and build only the static archive the Rust crate links.
+          p = Path('minijail/rust/minijail-sys/build.rs')
+          s = p.read_text()
+          old = '.env("BUILD_STATIC_LIBS", "yes")'
+          assert s.count(old) == 1
+          s = s.replace(old, old + '\n            .env("CC", std::env::var("CC_aarch64_linux_android").unwrap())\n            .env("CXX", std::env::var("CXX_aarch64_linux_android").unwrap())\n            .env("AR", std::env::var("AR_aarch64_linux_android").unwrap())\n            .env("CPPFLAGS", format!("-I{}/native-headers", std::env::var("GITHUB_WORKSPACE").unwrap()))\n            .arg("CC_STATIC_LIBRARY(libminijail.pic.a)")')
+          p.write_text(s)
+
+          print('patches applied')
+          PY
+
+      - name: Cargo build crosvm (aarch64-linux-android)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TC/bin/aarch64-linux-android33-clang"
+          export CC_aarch64_linux_android="$TC/bin/aarch64-linux-android33-clang"
+          export CXX_aarch64_linux_android="$TC/bin/aarch64-linux-android33-clang++"
+          export AR_aarch64_linux_android="$TC/bin/llvm-ar"
+          export CFLAGS_aarch64_linux_android="-I$PWD/native-headers"
+          export MINIJAIL_BINDGEN_TARGET=aarch64-linux-android33
+          export BINDGEN_EXTRA_CLANG_ARGS="--sysroot=$TC/sysroot"
+          export PKG_CONFIG_PATH="$PWD/native-prefix/lib/pkgconfig"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-L native=$PWD/native-libs -L native=$PWD/out -C link-arg=-Wl,-rpath,\$ORIGIN/../lib"
+          cd source
+          cargo +"$RUSTUP_TOOLCHAIN" build --locked --release --target aarch64-linux-android \
+            --no-default-features \
+            --features 'gpu,virgl_renderer,gunyah,qcow,net,config-file,balloon' \
+            2>&1 | tee ../cargo-build.log
+
+      - name: Verify and package
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p evidence/runtime/bin evidence/runtime/lib out-artifact
+          cp source/target/aarch64-linux-android/release/crosvm out-artifact/crosvm
+          "$TC/bin/llvm-objcopy" --only-keep-debug out-artifact/crosvm out-artifact/crosvm.debug
+          "$TC/bin/llvm-strip" --strip-debug out-artifact/crosvm
+          cp out/libvirglrenderer.so out-artifact/libvirglrenderer.so
+          "$TC/bin/llvm-readelf" -h -d out-artifact/crosvm > evidence/crosvm-elf.txt
+          "$TC/bin/llvm-readelf" -h -d out-artifact/libvirglrenderer.so > evidence/virglrenderer-elf.txt
+          grep -q 'Machine:.*AArch64' evidence/crosvm-elf.txt
+          grep -q 'AArch64' evidence/virglrenderer-elf.txt
+          strings out-artifact/crosvm | grep -i virglrenderer | sort -u > evidence/crosvm-virgl-strings.txt
+          test -s evidence/crosvm-virgl-strings.txt
+          "$TC/bin/llvm-readelf" -d out-artifact/crosvm | grep NEEDED || true
+          ( cd out-artifact && sha256sum crosvm libvirglrenderer.so | tee SHA256SUMS )
+          cp source-commit.txt evidence/source-commit.txt
+          cp cargo-build.log evidence/cargo-build.log || true
+          printf 'Android API33 aarch64 crosvm, features gpu,virgl_renderer,gunyah,qcow,net,config-file,balloon. Linked against the Mali kbase virglrenderer built by scripts/host-ndk/build-host-ndk.sh. Not runtime-tested by CI.\n' > evidence/scope.txt
+          ls -l out-artifact
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: crosvm-panvk-${{ github.run_id }}
+          path: |
+            out-artifact/
+            evidence/
+          if-no-files-found: error
+          retention-days: 30
