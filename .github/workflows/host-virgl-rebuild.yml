@@ -1,0 +1,46 @@
+name: host-virgl-rebuild
+# Self-contained rebuild of the PanVK host libvirglrenderer.so (Mali kbase
+# native-context backend). Deliberately separate from build-host-virglrenderer-ndk
+# so that concurrent workflow edits in this repo cannot change this build.
+on:
+  workflow_dispatch:
+  push:
+    branches: [ci/host-virgl-rebuild]
+    paths:
+      - '.github/workflows/host-virgl-rebuild.yml'
+      - 'scripts/host-virgl-rebuild/**'
+permissions:
+  contents: read
+concurrency:
+  group: host-virgl-rebuild-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout CI scripts
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record pinned sources
+        run: |
+          set -eux
+          echo "virglrenderer commit: e58441fc6fa6ce73e6545882b43c8c807fe22a11"
+          echo "branch: MollySophia/virglrenderer feature/mali-kbase-native-context"
+          sha256sum scripts/host-virgl-rebuild/*
+      - name: Install build tools
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y meson ninja-build pkg-config
+      - name: Build host libvirglrenderer with NDK
+        run: bash scripts/host-virgl-rebuild/build.sh
+      - name: Verify aarch64 Android ELF and symbol contract
+        run: bash scripts/host-virgl-rebuild/verify.sh out/libvirglrenderer.so
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: virglrenderer-mali-ndk-rebuild-${{ github.run_id }}
+          path: out/
+          if-no-files-found: error
