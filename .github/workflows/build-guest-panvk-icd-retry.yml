@@ -1,0 +1,131 @@
+name: build-guest-panvk-icd-retry
+on:
+  workflow_dispatch:
+    inputs:
+      mesa_ref:
+        description: mesa-manet commit to build
+        required: false
+        default: 57e402a2edb0c67fa5302c85e506d48f086b2cd2
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 180
+    steps:
+      - name: Install build dependencies
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            build-essential meson ninja-build python3-mako python3-yaml pkg-config bison flex \
+            libdrm-dev libudev-dev libwayland-dev wayland-protocols libx11-dev libxext-dev \
+            libxrandr-dev libxfixes-dev libxcb1-dev libxcb-dri3-dev libxcb-present-dev \
+            libxcb-sync-dev libxcb-shm0-dev libxcb-xfixes0-dev libexpat1-dev zlib1g-dev \
+            libzstd-dev libelf-dev libvulkan-dev glslang-tools xxd
+      - name: Install newer Meson in a venv
+        run: |
+          set -eux
+          python3 -m venv "$HOME/meson-venv"
+          "$HOME/meson-venv/bin/pip" install -q --upgrade pip
+          "$HOME/meson-venv/bin/pip" install -q 'meson>=1.4,<2' mako pyyaml packaging
+          echo "$HOME/meson-venv/bin" >> "$GITHUB_PATH"
+      - name: Checkout experimental Mesa PanVK
+        uses: actions/checkout@v4
+        with:
+          repository: MollySophia/mesa-manet
+          ref: ${{ inputs.mesa_ref }}
+          path: mesa
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Fix include names in experimental transport
+        run: |
+          set -eux
+          sed -i 's|kmod/kbase_virtio.h|kmod/mali_kbase_virtio.h|g' \
+            mesa/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c \
+            mesa/src/panfrost/vulkan/panvk_device_memory.c
+      - name: Retry a fresh control-page blob when a recycled BAR offset reads stale
+        run: |
+          set -eux
+          python3 - <<'PY'
+          import pathlib
+
+          p = pathlib.Path("mesa/src/panfrost/lib/kmod/mali_kbase_virtio.c")
+          lines = p.read_text().splitlines(keepends=True)
+
+          start = next(i for i, l in enumerate(lines)
+                       if "struct drm_virtgpu_resource_create_blob blob = {" in l)
+          end = next(i for i, l in enumerate(lines)
+                     if "*ctx = (struct kbv_ctx){.fd = fd, .gem = blob.bo_handle, .shm = shm};" in l)
+          assert start < end, "unexpected transport layout"
+
+          new = """   struct drm_virtgpu_resource_create_blob blob;
+             struct drm_virtgpu_map map;
+             void *shm = MAP_FAILED;
+             /* A recycled BAR offset can map a page that still holds the previous context's
+              * control page: the host re-registers the offset, but the guest's view of that
+              * page does not follow. Keep every rejected blob allocated so the kernel hands
+              * out a fresh range next time, and stop at the first page whose header reads
+              * back as the host wrote it (rsp_mem_offset == 8). */
+             for (unsigned attempt = 0; attempt < 8; attempt++) {
+                memset(&blob, 0, sizeof(blob));
+                blob.blob_mem = VIRTGPU_BLOB_MEM_HOST3D;
+                blob.blob_flags = VIRTGPU_BLOB_FLAG_USE_MAPPABLE;
+                blob.size = 4096;
+                if (ioctl(fd, DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB, &blob)) goto fail;
+                memset(&map, 0, sizeof(map));
+                map.handle = blob.bo_handle;
+                shm = MAP_FAILED;
+                if (!ioctl(fd, DRM_IOCTL_VIRTGPU_MAP, &map))
+                   shm = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, map.offset);
+                if (shm != MAP_FAILED && ((volatile uint32_t *)shm)[1] == 8)
+                   break;
+                if (shm != MAP_FAILED)
+                   fprintf(stderr, "kbase virtio: stale control page at 0x%llx, retrying\\n",
+                           (unsigned long long)map.offset);
+                shm = MAP_FAILED;
+             }
+             if (shm == MAP_FAILED) goto fail;
+          """
+          # Re-indent the replacement: the first line keeps 3 spaces, the rest 3+3.
+          body = new.splitlines(keepends=True)
+          body = [body[0]] + ["   " + l for l in body[1:]]
+          lines[start:end + 1] = body
+          p.write_text("".join(lines))
+          print("patched mali_kbase_virtio.c")
+          PY
+          sed -n '/struct drm_virtgpu_resource_create_blob blob;/,/^   \*ctx = (struct kbv_ctx)/p' mesa/src/panfrost/lib/kmod/mali_kbase_virtio.c | head -40
+      - name: Build PanVK with kbase virtio kmod
+        run: |
+          set -eux
+          cd mesa
+          meson setup build \
+            -Dbuildtype=release -Dwerror=false \
+            -Dvulkan-drivers=panfrost -Dgallium-drivers= \
+            -Dpanfrost-kmds=kbase \
+            -Dplatforms=wayland -Dglx=disabled -Degl=disabled \
+            -Dgles1=disabled -Dgles2=disabled
+          ninja -C build -j"$(nproc)"
+          find build -name 'libvulkan_manet.so*' -ls
+      - name: Stage ICD payload
+        run: |
+          set -eux
+          mkdir -p out
+          lib=$(find mesa/build -name 'libvulkan_manet.so*' | head -1)
+          test -n "$lib"
+          cp "$lib" out/libvulkan_manet.so
+          cat > out/panvk_icd.json <<'JSON'
+          {
+            "file_format_version": "1.0.0",
+            "ICD": {
+              "library_path": "/opt/panvk/libvulkan_manet.so",
+              "api_version": "1.3.0"
+            }
+          }
+          JSON
+          sha256sum out/libvulkan_manet.so | tee out/SHA256SUMS
+          grep -ac 'stale control page' out/libvulkan_manet.so || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: panvk-icd-retry-${{ github.run_id }}
+          path: out/
