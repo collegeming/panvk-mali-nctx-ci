@@ -89,7 +89,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: source -> target
-          key: crosvm-panvk
+          key: crosvm-panvk-v2
           cache-on-failure: true
 
       - name: Record source pin
@@ -146,7 +146,7 @@ jobs:
           Description: virglrenderer (Mali kbase native-context fork)
           Version: 1.0.0
           Libs: -L\${libdir} -lvirglrenderer
-          Cflags: -I\${includedir} -DVIRGL_RENDERER_UNSTABLE_APIS
+          Cflags: -I\${includedir}
           EOF
           cat native-prefix/lib/pkgconfig/virglrenderer.pc
           PKG_CONFIG_PATH="$PWD/native-prefix/lib/pkgconfig" pkg-config --modversion virglrenderer --libs --cflags
