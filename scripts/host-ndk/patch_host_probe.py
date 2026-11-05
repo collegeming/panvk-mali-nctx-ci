@@ -156,6 +156,14 @@ qs = rep(qs, """      struct kbase_ioctl_cs_queue_kick kick = {.buffer_gpu_addr 
       fprintf(stderr, "mali-queue: kick ret=%d errno=%d insert=0x%llx bo_size=%u\\n",
               kr, errno, (unsigned long long)insert, bo->size);
       if (kr) return -errno;""")
+qs = rep(qs, """      for (unsigned i = 0; i < 32; i++) if (c->queue[i].io) queue_update(&c->queue[i]);
+      return 0;""",
+         """      for (unsigned i = 0; i < 32; i++) if (c->queue[i].io) queue_update(&c->queue[i]);
+      for (unsigned i = 0; i < 32; i++) if (c->queue[i].io)
+         fprintf(stderr, "mali-queue: wait q%u extract=0x%llx insert=0x%llx\\n", i,
+                 (unsigned long long)*(volatile uint64_t *)((uint8_t *)c->queue[i].io + 8192 + c->queue[i].slot),
+                 (unsigned long long)c->queue[i].insert);
+      return 0;""")
 qs = rep(qs, """   int fd = -1, ret;
    void *io = MAP_FAILED, *shm = MAP_FAILED;
    if (ioctl(c->base.fd, KBASE_IOCTL_CS_QUEUE_BIND, &bind)) goto fail;""",
