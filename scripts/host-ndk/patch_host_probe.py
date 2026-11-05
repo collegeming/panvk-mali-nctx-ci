@@ -140,4 +140,32 @@ s = rep(s, '''   if (handshake(fd, &ver) || gpu_id(fd, &c->gpu_id)) goto fail;''
    if (hs_ret || id_ret) goto fail;''')
 mali.write_text(s)
 
+# Diagnose the submission path: kick/bind results decide whether the GPU ever
+# sees a job, and the transport's copy happens between the guest's ring and the
+# shadow BO.
+q = root / 'src/drm/kbase_transport_queue.h'
+qs = q.read_text()
+qs = rep(qs, """   uint64_t va; memcpy(&va, req->data, 8);""",
+         """   uint64_t va; memcpy(&va, req->data, 8);
+   fprintf(stderr, "mali-queue: op=%u va=0x%llx size=%u off=%u\\n",
+           req->handle, (unsigned long long)va, req->size, req->offset);""")
+qs = rep(qs, """      struct kbase_ioctl_cs_queue_kick kick = {.buffer_gpu_addr = va};
+      if (ioctl(c->base.fd, KBASE_IOCTL_CS_QUEUE_KICK, &kick)) return -errno;""",
+         """      struct kbase_ioctl_cs_queue_kick kick = {.buffer_gpu_addr = va};
+      int kr = ioctl(c->base.fd, KBASE_IOCTL_CS_QUEUE_KICK, &kick);
+      fprintf(stderr, "mali-queue: kick ret=%d errno=%d insert=0x%llx bo_size=%u\\n",
+              kr, errno, (unsigned long long)insert, bo->size);
+      if (kr) return -errno;""")
+qs = rep(qs, """   int fd = -1, ret;
+   void *io = MAP_FAILED, *shm = MAP_FAILED;
+   if (ioctl(c->base.fd, KBASE_IOCTL_CS_QUEUE_BIND, &bind)) goto fail;""",
+         """   int fd = -1, ret;
+   void *io = MAP_FAILED, *shm = MAP_FAILED;
+   if (ioctl(c->base.fd, KBASE_IOCTL_CS_QUEUE_BIND, &bind)) {
+      fprintf(stderr, "mali-queue: bind ioctl failed errno=%d group=%u csi=%u\\n",
+              errno, group, req->offset);
+      goto fail;
+   }""")
+q.write_text(qs)
+
 print('host probe diagnostics patched')
