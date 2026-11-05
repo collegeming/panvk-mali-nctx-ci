@@ -154,6 +154,10 @@ jobs:
         run: |
           set -eux
           python3 scripts/panvk-icd-diagnostics.py mesa
+      - name: Instrument device creation
+        run: |
+          set -eux
+          python3 scripts/panvk-icd-devcreate.py mesa
       - name: Build PanVK with kbase virtio kmod
         run: |
           set -eux
