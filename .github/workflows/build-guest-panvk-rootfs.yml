@@ -226,6 +226,22 @@ jobs:
           for f in additions/virtio_gpu/*.c; do
             sed -i 's/struct drm_atomic_state \*state/struct drm_atomic_commit *state/g' "$f"
           done
+          python3 - <<'PY'
+          import pathlib
+          p = pathlib.Path('additions/virtio_gpu/virtgpu_vram.c')
+          s = p.read_text()
+          old = chr(9) + chr(9) + 'if (unmap)' + chr(10) + chr(9) * 3 + 'virtio_gpu_cmd_unmap(vgdev, bo);' + chr(10)
+          new = (chr(9) + chr(9) + 'if (unmap) {' + chr(10) +
+                 chr(9) * 3 + 'virtio_gpu_cmd_unmap(vgdev, bo);' + chr(10) +
+                 chr(9) * 3 + 'spin_lock(&vgdev->host_visible_lock);' + chr(10) +
+                 chr(9) * 3 + 'if (drm_mm_node_allocated(&vram->vram_node))' + chr(10) +
+                 chr(9) * 4 + 'drm_mm_remove_node(&vram->vram_node);' + chr(10) +
+                 chr(9) * 3 + 'spin_unlock(&vgdev->host_visible_lock);' + chr(10) +
+                 chr(9) + chr(9) + '}' + chr(10))
+          assert old in s, 'unmap block not found'
+          p.write_text(s.replace(old, new, 1))
+          print('virtgpu_vram.c: freed objects drop their BAR range')
+          PY
           aria2c -x8 -s8 -q -o ArchLinuxARM-aarch64-latest.tar.gz \
             http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz
           truncate -s 10G root.img
@@ -253,7 +269,7 @@ jobs:
             pacman -Syu --noconfirm
             pacman -S --noconfirm --needed openssh vulkan-tools libdrm mkinitcpio linux-aarch64 \
               systemd-libs wayland libxcb libx11 libxext libxrandr libxfixes zstd libelf expat zlib \
-              base-devel linux-aarch64-headers
+              base-devel linux-aarch64-headers mesa niri noctalia quickshell
             pacman -Q linux-aarch64
             test -e /boot/Image
             kver=$(ls /usr/lib/modules | head -1)
@@ -285,6 +301,40 @@ jobs:
           ExecStart=-/sbin/agetty --autologin root --noclear %I linux
           TTYEOF
             systemctl enable serial-getty@ttyS0
+            mkdir -p /etc/systemd/system
+            cat > /etc/systemd/system/niri-panvk.service <<'UNITEOF'
+          [Unit]
+          Description=niri (PanVK VM)
+          After=systemd-user-sessions.service dev-dri-card0.device
+          Conflicts=getty@tty1.service
+
+          [Service]
+          Type=simple
+          TTYPath=/dev/tty1
+          StandardInput=tty
+          StandardOutput=tty
+          StandardError=journal
+          PAMName=login
+          UtmpIdentifier=tty1
+          TTYReset=yes
+          TTYVHangup=yes
+          TTYVTDisallocate=no
+          Environment=XDG_RUNTIME_DIR=/run/user/0
+          Environment=XDG_SESSION_TYPE=wayland
+          Environment=QT_QUICK_BACKEND=software
+          Environment=QT_WAYLAND_CLIENT_BUFFER_INTEGRATION=shm
+          Environment=PAN_I_WANT_A_BROKEN_VULKAN_DRIVER=1
+          Environment=PANVK_KBASE_VIRTIO=/dev/dri/renderD128
+          Environment=VK_DRIVER_FILES=/opt/panvk/panvk_icd.json
+          ExecStart=/usr/bin/niri --session
+          Restart=no
+
+          [Install]
+          WantedBy=multi-user.target
+          UNITEOF
+            mkdir -p /root/.config/niri
+            printf 'spawn-at-startup "noctalia"\n' > /root/.config/niri/config.kdl
+            systemctl enable niri-panvk.service
             sed -i "s/^MODULES=.*/MODULES=(virtio_pci virtio_blk virtio_net virtio_gpu gunyah_guest ext4)/" /etc/mkinitcpio.conf
             grep -q "virtio_blk" /etc/mkinitcpio.conf
             mkinitcpio -P
