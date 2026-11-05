@@ -91,6 +91,10 @@ jobs:
                 shm = MAP_FAILED;
              }
              if (shm == MAP_FAILED) goto fail;
+             /* The context has to be recorded before returning: every request goes through
+              * rpc(), which looks the fd up in `contexts`. Leaving this out makes the blob
+              * appear built and mapped while every request fails with ENODEV. */
+             *ctx = (struct kbv_ctx){.fd = fd, .gem = blob.bo_handle, .shm = shm};
           """
           # Re-indent the replacement: the first line keeps 3 spaces, the rest 3+3.
           body = new.splitlines(keepends=True)
@@ -100,6 +104,48 @@ jobs:
           print("patched mali_kbase_virtio.c")
           PY
           sed -n '/struct drm_virtgpu_resource_create_blob blob;/,/^   \*ctx = (struct kbv_ctx)/p' mesa/src/panfrost/lib/kmod/mali_kbase_virtio.c | head -40
+      - name: Instrument the transport init path
+        run: |
+          set -eux
+          python3 - <<'PY'
+          import pathlib
+
+          p = pathlib.Path("mesa/src/panfrost/lib/kmod/mali_kbase_virtio.c")
+          s = p.read_text()
+
+          def rep(old, new):
+              global s
+              assert old in s, old[:70]
+              s = s.replace(old, new, 1)
+
+          rep('      errno = ENODEV; return -1;\n   }',
+              '      fprintf(stderr, "kbv: caps fail fd=%d caps=[%u,%u,%u,%u,%u,%u]\\n", fd, caps[0], caps[1], caps[2], caps[3], caps[4], caps[5]);\n      errno = ENODEV; return -1;\n   }\n   fprintf(stderr, "kbv: caps ok fd=%d v%u.%u\\n", fd, caps[1], caps[2]);')
+
+          rep('   if (!ctx) { errno = EMFILE; goto fail; }',
+              '   if (!ctx) { fprintf(stderr, "kbv: no free ctx slot\\n"); errno = EMFILE; goto fail; }')
+
+          rep('if (ioctl(fd, DRM_IOCTL_VIRTGPU_CONTEXT_INIT, &init)) goto fail;',
+              'if (ioctl(fd, DRM_IOCTL_VIRTGPU_CONTEXT_INIT, &init)) { fprintf(stderr, "kbv: ctxinit fd=%d errno=%d\\n", fd, errno); goto fail; }')
+
+          rep('if (ioctl(fd, DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB, &blob)) goto fail;',
+              'if (ioctl(fd, DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB, &blob)) { fprintf(stderr, "kbv: blob fd=%d errno=%d\\n", fd, errno); goto fail; }')
+
+          rep('if (shm != MAP_FAILED && ((volatile uint32_t *)shm)[1] == 8)',
+              'fprintf(stderr, "kbv: map fd=%d off=0x%llx shm=%p hdr=[%u,%u]\\n", fd, (unsigned long long)map.offset, shm, shm != MAP_FAILED ? ((volatile uint32_t *)shm)[0] : 0xffffffffu, shm != MAP_FAILED ? ((volatile uint32_t *)shm)[1] : 0xffffffffu);\n                if (shm != MAP_FAILED && ((volatile uint32_t *)shm)[1] == 8)')
+
+          rep('*ctx = (struct kbv_ctx){.fd = fd, .gem = blob.bo_handle, .shm = shm};',
+              '*ctx = (struct kbv_ctx){.fd = fd, .gem = blob.bo_handle, .shm = shm};\n             fprintf(stderr, "kbv: ready fd=%d gem=%u shm=%p\\n", fd, blob.bo_handle, shm);')
+
+          rep('   if (!ctx) { errno = ENODEV; goto out; }',
+              '   if (!ctx) { fprintf(stderr, "kbv: rpc no ctx fd=%d\\n", fd); errno = ENODEV; goto out; }')
+
+          rep('   if (shm[1] != 8) { errno = EPROTO; goto out; }',
+              '   if (shm[1] != 8) { fprintf(stderr, "kbv: bad page fd=%d shm1=%u\\n", fd, shm[1]); errno = EPROTO; goto out; }')
+
+          p.write_text(s)
+          print("instrumented mali_kbase_virtio.c")
+          PY
+          grep -n 'kbv:' mesa/src/panfrost/lib/kmod/mali_kbase_virtio.c
       - name: Build PanVK with kbase virtio kmod
         run: |
           set -eux
