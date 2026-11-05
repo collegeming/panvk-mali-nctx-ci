@@ -146,6 +146,10 @@ jobs:
           print("instrumented mali_kbase_virtio.c")
           PY
           grep -n 'kbv:' mesa/src/panfrost/lib/kmod/mali_kbase_virtio.c
+      - name: Instrument the device-init path
+        run: |
+          set -eux
+          python3 scripts/panvk-icd-diagnostics.py mesa
       - name: Build PanVK with kbase virtio kmod
         run: |
           set -eux
