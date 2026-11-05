@@ -99,5 +99,46 @@ rep('''   for (unsigned i = 0; i < pCreateInfo->queueCreateInfoCount; i++) {
 
       result = check_global_priority(physical_device, queue_create);''')
 
+
+q = root / "src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c"
+qs = q.read_text()
+
+
+def repq(old, new):
+    global qs
+    assert old in qs, old[:90]
+    qs = qs.replace(old, new, 1)
+
+
+repq("""      result = kbase_create_group(queue, shader_core_count);
+      if (result != VK_SUCCESS)
+         goto err_destroy_syncobj;
+      group_created = true;
+
+      result = init_tiler(queue);
+      if (result != VK_SUCCESS)
+         goto err_cleanup_created;
+      tiler_initialized = true;""",
+     """      result = kbase_create_group(queue, shader_core_count);
+      fprintf(stderr, "pvkq: kbase_create_group result=%d\\n", result);
+      if (result != VK_SUCCESS)
+         goto err_destroy_syncobj;
+      group_created = true;
+
+      result = init_tiler(queue);
+      fprintf(stderr, "pvkq: init_tiler result=%d\\n", result);
+      if (result != VK_SUCCESS)
+         goto err_cleanup_created;
+      tiler_initialized = true;""")
+
+repq("""   result = init_queue(queue);
+   if (result != VK_SUCCESS)
+      goto err_cleanup_created;""",
+     """   result = init_queue(queue);
+   fprintf(stderr, "pvkq: init_queue result=%d\\n", result);
+   if (result != VK_SUCCESS)
+      goto err_cleanup_created;""")
+
+q.write_text(qs)
 p.write_text(s)
 print("instrumented", p)
