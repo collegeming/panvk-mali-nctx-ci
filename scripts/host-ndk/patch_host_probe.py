@@ -138,6 +138,74 @@ s = rep(s, '''   if (handshake(fd, &ver) || gpu_id(fd, &c->gpu_id)) goto fail;''
    fprintf(stderr, "mali-create: fd=%d handshake=%d gpu_id=%d gpu=0x%llx errno=%d\\n",
            fd, hs_ret, id_ret, (unsigned long long)c->gpu_id, errno);
    if (hs_ret || id_ret) goto fail;''')
+# Track queue-group handles so destroy() can terminate them. The CSG slots are a
+# GPU-wide resource: every PanVK device takes a few, and a context that exits
+# without terminating its groups leaks them for the rest of the VM's life.
+s = rep(s, '''   uint32_t next_queue;
+   struct { void *ptr; uint64_t size; } alias[32];
+};''', '''   uint32_t next_queue;
+   struct { void *ptr; uint64_t size; } alias[32];
+   uint8_t groups[16];
+   uint32_t n_groups;
+};''')
+s = rep(s, '''      case KBASE_IOCTL_MEM_JIT_INIT:
+      case KBASE_IOCTL_MEM_EXEC_INIT:
+      case KBASE_IOCTL_CS_QUEUE_GROUP_CREATE:
+      case KBASE_IOCTL_CS_QUEUE_GROUP_CREATE_1_19:
+      case KBASE_IOCTL_CS_QUEUE_GROUP_CREATE_1_18:
+      case KBASE_IOCTL_CS_QUEUE_GROUP_CREATE_1_6:
+      case KBASE_IOCTL_CS_QUEUE_GROUP_TERMINATE:
+      case KBASE_IOCTL_CS_TILER_HEAP_INIT:
+      case KBASE_IOCTL_CS_TILER_HEAP_TERM:
+      case KBASE_IOCTL_GET_CPU_GPU_TIMEINFO:
+         memcpy(r->data, q->data, q->size);
+         if (ioctl(base->fd, q->handle, r->data)) r->status = -errno;
+         r->size = q->size; return 0;''', '''      case KBASE_IOCTL_MEM_JIT_INIT:
+      case KBASE_IOCTL_MEM_EXEC_INIT:
+      case KBASE_IOCTL_CS_QUEUE_GROUP_CREATE:
+      case KBASE_IOCTL_CS_QUEUE_GROUP_CREATE_1_19:
+      case KBASE_IOCTL_CS_QUEUE_GROUP_CREATE_1_18:
+      case KBASE_IOCTL_CS_QUEUE_GROUP_CREATE_1_6:
+      case KBASE_IOCTL_CS_QUEUE_GROUP_TERMINATE:
+      case KBASE_IOCTL_CS_TILER_HEAP_INIT:
+      case KBASE_IOCTL_CS_TILER_HEAP_TERM:
+      case KBASE_IOCTL_GET_CPU_GPU_TIMEINFO: {
+         memcpy(r->data, q->data, q->size);
+         int iret = ioctl(base->fd, q->handle, r->data);
+         fprintf(stderr, "mali-ioctl: fd=%d cmd=0x%lx ret=%d errno=%d resp0=%u groups=%u\\n",
+                 base->fd, (unsigned long)q->handle, iret, errno,
+                 q->size ? (unsigned)r->data[0] : 0u, c->n_groups);
+         if (iret) { r->status = -errno; r->size = q->size; return 0; }
+         if (q->handle == KBASE_IOCTL_CS_QUEUE_GROUP_CREATE ||
+             q->handle == KBASE_IOCTL_CS_QUEUE_GROUP_CREATE_1_19 ||
+             q->handle == KBASE_IOCTL_CS_QUEUE_GROUP_CREATE_1_18 ||
+             q->handle == KBASE_IOCTL_CS_QUEUE_GROUP_CREATE_1_6) {
+            if (c->n_groups < 16) c->groups[c->n_groups++] = r->data[0];
+         } else if (q->handle == KBASE_IOCTL_CS_QUEUE_GROUP_TERMINATE) {
+            for (unsigned i = 0; i < c->n_groups; i++) {
+               if (c->groups[i] != r->data[0]) continue;
+               c->groups[i] = c->groups[--c->n_groups]; break;
+            }
+         }
+         r->size = q->size; return 0;
+      }''')
+s = rep(s, '''static void destroy(struct virgl_context *v)
+{
+   struct kb_ctx *c = (void *)v;
+   for (unsigned i = 0; i < 32; i++)
+      if (c->queue[i].io) queue_free(c, &c->queue[i]);''', '''static void destroy(struct virgl_context *v)
+{
+   struct kb_ctx *c = (void *)v;
+   for (unsigned i = 0; i < 32; i++)
+      if (c->queue[i].io) queue_free(c, &c->queue[i]);
+   for (unsigned i = 0; i < c->n_groups; i++) {
+      struct kbase_ioctl_cs_queue_group_term term = {.group_handle = c->groups[i]};
+      int gr = ioctl(c->base.fd, KBASE_IOCTL_CS_QUEUE_GROUP_TERMINATE, &term);
+      fprintf(stderr, "mali-group: terminate handle=%u ret=%d errno=%d\\n",
+              c->groups[i], gr, errno);
+   }
+   c->n_groups = 0;''')
+
 mali.write_text(s)
 
 # Diagnose the submission path: kick/bind results decide whether the GPU ever
