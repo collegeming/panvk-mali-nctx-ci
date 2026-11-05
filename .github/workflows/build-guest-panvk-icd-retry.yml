@@ -13,6 +13,10 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 180
     steps:
+      - name: Checkout CI helpers
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Install build dependencies
         run: |
           set -eux
