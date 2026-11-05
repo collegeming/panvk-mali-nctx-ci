@@ -221,5 +221,32 @@ repq("""      VkResult res = kbase_subqueue_wait_seqno(
               (unsigned long long)queue->subqueues[i].kbase.emitted_jobs);
       if (res != VK_SUCCESS)""")
 q.write_text(qs)
+
+# Report a render node for the kbase transport so zink can match the GBM device
+# through VK_EXT_physical_device_drm (without it: "ZINK: failed to choose pdev").
+pd = root / "src/panfrost/vulkan/panvk_physical_device.c"
+ps = pd.read_text()
+
+
+def repp(old, new):
+    global ps
+    assert old in ps, old[:90]
+    ps = ps.replace(old, new, 1)
+
+
+repp("""   /* kbase does not expose DRM nodes, so drm.{render,primary}_rdev are left
+    * zeroed; WSI paths that compare rdev values will simply not match. */""",
+     """   /* Report the transport's device node as the render node. Loaders and zink
+    * match a Vulkan physical device against a DRM device through
+    * VK_EXT_physical_device_drm; with both rdev fields zeroed zink logs
+    * "failed to choose pdev" and the compositor falls back to software. */
+   {
+      struct stat st;
+
+      if (stat(path, &st) == 0)
+         device->drm.render_rdev = st.st_rdev;
+   }""")
+
+pd.write_text(ps)
 p.write_text(s)
 print("instrumented", p)
