@@ -139,6 +139,52 @@ repq("""   result = init_queue(queue);
    if (result != VK_SUCCESS)
       goto err_cleanup_created;""")
 
+
+repq("""   result = init_render_desc_ringbuf(queue);
+   if (result != VK_SUCCESS)
+      goto err_cleanup_queue;
+
+   result = init_utrace(queue);
+   if (result != VK_SUCCESS)
+      goto err_cleanup_queue;
+
+   for (uint32_t i = 0; i < PANVK_SUBQUEUE_COUNT; i++) {
+      result = init_subqueue(queue, i);
+      if (result != VK_SUCCESS)
+         goto err_cleanup_queue;
+   }""",
+     """   result = init_render_desc_ringbuf(queue);
+   fprintf(stderr, "pvkq: render_desc_ringbuf result=%d\\n", result);
+   if (result != VK_SUCCESS)
+      goto err_cleanup_queue;
+
+   result = init_utrace(queue);
+   fprintf(stderr, "pvkq: utrace result=%d\\n", result);
+   if (result != VK_SUCCESS)
+      goto err_cleanup_queue;
+
+   for (uint32_t i = 0; i < PANVK_SUBQUEUE_COUNT; i++) {
+      result = init_subqueue(queue, i);
+      fprintf(stderr, "pvkq: init_subqueue %u result=%d\\n", i, result);
+      if (result != VK_SUCCESS)
+         goto err_cleanup_queue;
+   }""")
+
+repq("""      result = kbase_submit_init_subqueues(queue);
+      if (result != VK_SUCCESS)
+         goto err_cleanup_queue;""",
+     """      result = kbase_submit_init_subqueues(queue);
+      fprintf(stderr, "pvkq: submit_init_subqueues result=%d\\n", result);
+      if (result != VK_SUCCESS)
+         goto err_cleanup_queue;""")
+
+repq("""      result = kbase_init_seqnos(queue);
+      if (result != VK_SUCCESS)
+         return result;""",
+     """      result = kbase_init_seqnos(queue);
+      fprintf(stderr, "pvkq: init_seqnos result=%d\\n", result);
+      if (result != VK_SUCCESS)
+         return result;""")
 q.write_text(qs)
 p.write_text(s)
 print("instrumented", p)
