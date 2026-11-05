@@ -269,7 +269,7 @@ jobs:
             pacman -Syu --noconfirm
             pacman -S --noconfirm --needed openssh vulkan-tools libdrm mkinitcpio linux-aarch64 \
               systemd-libs wayland libxcb libx11 libxext libxrandr libxfixes zstd libelf expat zlib \
-              base-devel linux-aarch64-headers mesa niri noctalia quickshell
+              base-devel linux-aarch64-headers mesa niri noctalia quickshell ttf-dejavu
             pacman -Q linux-aarch64
             test -e /boot/Image
             kver=$(ls /usr/lib/modules | head -1)
@@ -333,8 +333,13 @@ jobs:
           WantedBy=multi-user.target
           UNITEOF
             mkdir -p /root/.config/niri
-            printf 'spawn-at-startup "noctalia"\n' > /root/.config/niri/config.kdl
-            systemctl enable niri-panvk.service
+            mkdir -p /root/.config/niri
+            cat > /root/.config/niri/config.kdl <<'NIRIEOF'
+          spawn-at-startup "noctalia"
+          NIRIEOF
+            mkdir -p /etc/systemd/system/multi-user.target.wants
+            ln -sf /etc/systemd/system/niri-panvk.service \
+              /etc/systemd/system/multi-user.target.wants/niri-panvk.service
             sed -i "s/^MODULES=.*/MODULES=(virtio_pci virtio_blk virtio_net virtio_gpu gunyah_guest ext4)/" /etc/mkinitcpio.conf
             grep -q "virtio_blk" /etc/mkinitcpio.conf
             mkinitcpio -P
