@@ -185,6 +185,41 @@ repq("""      result = kbase_init_seqnos(queue);
       fprintf(stderr, "pvkq: init_seqnos result=%d\\n", result);
       if (result != VK_SUCCESS)
          return result;""")
+
+repq("""   if (*active) {
+      *(volatile uint32_t *)subq->kbase.user_io.doorbell = 1;""",
+     """   fprintf(stderr, "pvbq: publish sq%u active=%u insert=%llu\\n", subqueue,
+           (unsigned)*active, (unsigned long long)subq->kbase.insert);
+   if (*active) {
+      *(volatile uint32_t *)subq->kbase.user_io.doorbell = 1;""")
+
+repq("""      VkResult res =
+         kbase_subqueue_emit_job(queue, subqueue, subq->kbase.init_stream_addr,""",
+     """      VkResult res =
+         kbase_subqueue_emit_job(queue, subqueue, subq->kbase.init_stream_addr,""")
+
+repq("""      if (res != VK_SUCCESS)
+         return panvk_errorf(dev->vk.physical, VK_ERROR_INITIALIZATION_FAILED,
+                             "Failed to initialize subqueue");
+
+      subq->kbase.init_pending = 0;""",
+     """      fprintf(stderr, "pvbq: emit sq%u res=%d\\n", subqueue, res);
+      if (res != VK_SUCCESS)
+         return panvk_errorf(dev->vk.physical, VK_ERROR_INITIALIZATION_FAILED,
+                             "Failed to initialize subqueue");
+
+      subq->kbase.init_pending = 0;""")
+
+repq("""      VkResult res = kbase_subqueue_wait_seqno(
+         queue, i, queue->subqueues[i].kbase.emitted_jobs, touched, false,
+         UINT64_MAX);
+      if (res != VK_SUCCESS)""",
+     """      VkResult res = kbase_subqueue_wait_seqno(
+         queue, i, queue->subqueues[i].kbase.emitted_jobs, touched, false,
+         UINT64_MAX);
+      fprintf(stderr, "pvbq: wait sq%u res=%d emitted=%llu\\n", i, res,
+              (unsigned long long)queue->subqueues[i].kbase.emitted_jobs);
+      if (res != VK_SUCCESS)""")
 q.write_text(qs)
 p.write_text(s)
 print("instrumented", p)
