@@ -248,5 +248,58 @@ repp("""   /* kbase does not expose DRM nodes, so drm.{render,primary}_rdev are 
    }""")
 
 pd.write_text(ps)
+
+# Let zink/kopper export a virtio BO as a dma-buf: PRIME out of the guest's
+# virtio-gpu GEM handle, which the driver backs with the BAR pages.
+km = root / "src/panfrost/lib/kmod/kbase_kmod.c"
+ks = km.read_text()
+
+
+def repk(old, new):
+    global ks
+    assert old in ks, old[:90]
+    ks = ks.replace(old, new, 1)
+
+
+repk('#include "drm-uapi/panthor_drm.h"',
+     '#include "drm-uapi/panthor_drm.h"' + chr(10) + '#include <xf86drm.h>')
+
+repk("""static int
+kbase_kmod_bo_export_fd(struct pan_kmod_bo *bo)
+{
+   struct kbase_kmod_bo *kbase_bo =
+      container_of(bo, struct kbase_kmod_bo, base);
+
+   if (kbase_bo->dmabuf_fd < 0) {
+      errno = ENOSYS;
+      return -1;
+   }
+""",
+     """static int
+kbase_kmod_bo_export_fd(struct pan_kmod_bo *bo)
+{
+   struct kbase_kmod_bo *kbase_bo =
+      container_of(bo, struct kbase_kmod_bo, base);
+
+   /* A native virtio BO has no dma-buf yet: PRIME out of its virtio-gpu GEM
+    * handle, which the guest driver exports over the BAR pages. zink/kopper
+    * needs this for every scanout image (vkGetMemoryFdKHR). */
+   if (kbase_bo->dmabuf_fd < 0 && kbase_bo->virtio_gem) {
+      int fd = -1;
+
+      if (drmPrimeHandleToFD(bo->dev->fd, kbase_bo->virtio_gem,
+                             DRM_CLOEXEC | DRM_RDWR, &fd) == 0 && fd >= 0)
+         kbase_bo->dmabuf_fd = fd;
+   }
+
+   if (kbase_bo->dmabuf_fd < 0) {
+      mesa_loge("kbase: BO export failed (gem=%u, errno=%d)",
+                kbase_bo->virtio_gem, errno);
+      errno = ENOSYS;
+      return -1;
+   }
+""")
+
+km.write_text(ks)
 p.write_text(s)
 print("instrumented", p)
