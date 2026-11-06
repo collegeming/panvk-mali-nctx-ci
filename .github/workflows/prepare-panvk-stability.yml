@@ -136,12 +136,10 @@ jobs:
           p.write_text(s)
           PY
           git diff --check
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add .github/workflows/build-guest-panvk-rootfs.yml
-          git commit -m 'panvk: unify ICD fixes and gate rootfs with lifecycle and boot checks'
-          git push origin HEAD:refs/heads/panvk/stability-v1
-      - name: Build isolated stability image
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh workflow run build-guest-panvk-rootfs.yml --ref panvk/stability-v1
+      - name: Publish the workflow generated in CI
+        uses: actions/upload-artifact@v4
+        with:
+          name: panvk-stability-generated-workflow
+          path: .github/workflows/build-guest-panvk-rootfs.yml
+          include-hidden-files: true
+          if-no-files-found: error
