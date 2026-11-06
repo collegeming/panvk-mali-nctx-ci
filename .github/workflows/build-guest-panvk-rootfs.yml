@@ -15,6 +15,9 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 360
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Install build dependencies
         run: |
           set -eux
@@ -51,6 +54,11 @@ jobs:
             mesa/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c \
             mesa/src/panfrost/vulkan/panvk_device_memory.c
           grep -R 'kbase_virtio.h' mesa/src/panfrost | sort
+      - name: Apply the shared PanVK fixes
+        run: |
+          set -eux
+          python3 scripts/panvk-icd-diagnostics.py mesa
+          python3 scripts/panvk-icd-devcreate.py mesa
       - name: Build PanVK with kbase virtio kmod
         run: |
           set -eux
@@ -84,7 +92,8 @@ jobs:
           #include "probe_spv.h"
           #define CK(x) do { VkResult r_ = (x); if (r_ != VK_SUCCESS) { \
             fprintf(stderr, "%s -> %d\n", #x, (int)r_); return 1; } } while (0)
-          int main(void) {
+          static int run_once(unsigned iteration) {
+            printf("iteration=%u create\n", iteration);
             VkApplicationInfo app = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
               .apiVersion = VK_API_VERSION_1_1 };
             VkInstanceCreateInfo ici = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
@@ -192,7 +201,37 @@ jobs:
             printf("result=0x%08x expected=0x12345678 %s\n", val,
               val == 0x12345678u ? "PASS" : "FAIL");
             vkUnmapMemory(dev, mem);
+            vkDestroyFence(dev, fence, NULL);
+            vkDestroyCommandPool(dev, cp, NULL);
+            vkDestroyDescriptorPool(dev, dp, NULL);
+            vkDestroyPipeline(dev, pipe, NULL);
+            vkDestroyPipelineLayout(dev, pl, NULL);
+            vkDestroyDescriptorSetLayout(dev, dsl, NULL);
+            vkDestroyShaderModule(dev, sm, NULL);
+            vkDestroyBuffer(dev, buf, NULL);
+            vkFreeMemory(dev, mem, NULL);
+            printf("iteration=%u destroy-device\n", iteration); fflush(stdout);
+            vkDestroyDevice(dev, NULL);
+            vkDestroyInstance(inst, NULL);
+            free(q); free(pds);
+            printf("iteration=%u destroyed\n", iteration); fflush(stdout);
             return val == 0x12345678u ? 0 : 5;
+          }
+          int main(int argc, char **argv) {
+            char *end = NULL;
+            unsigned long count = 1;
+            setvbuf(stdout, NULL, _IONBF, 0);
+            if (argc > 2) return 64;
+            if (argc == 2) {
+              count = strtoul(argv[1], &end, 10);
+              if (!*argv[1] || *end || count < 1 || count > 100) return 64;
+            }
+            for (unsigned i = 1; i <= count; ++i) {
+              int ret = run_once(i);
+              if (ret) return ret;
+            }
+            printf("LIFECYCLE PASS iterations=%lu\n", count);
+            return 0;
           }
           C
           cc -O2 -Wall -Wextra -o payload/panvk_compute_probe payload/probe.c $(pkg-config --cflags --libs vulkan)
@@ -300,6 +339,12 @@ jobs:
           ExecStart=
           ExecStart=-/sbin/agetty --autologin root --noclear %I linux
           TTYEOF
+            /usr/lib/systemd/systemd --version
+            /usr/bin/niri --version
+            /usr/bin/noctalia --help
+            ldd /usr/lib/systemd/systemd > /opt/panvk/systemd-ldd.txt
+            ldd /opt/panvk/libvulkan_manet.so > /opt/panvk/panvk-ldd.txt
+            ! grep -q "not found" /opt/panvk/*-ldd.txt
             systemctl enable serial-getty@ttyS0
             mkdir -p /etc/systemd/system
             cat > /etc/systemd/system/niri-panvk.service <<'UNITEOF'
@@ -326,6 +371,7 @@ jobs:
           Environment=PAN_I_WANT_A_BROKEN_VULKAN_DRIVER=1
           Environment=PANVK_KBASE_VIRTIO=/dev/dri/renderD128
           Environment=VK_DRIVER_FILES=/opt/panvk/panvk_icd.json
+          Environment=MESA_LOADER_DRIVER_OVERRIDE=zink
           ExecStart=/usr/bin/niri --session
           Restart=no
 
@@ -338,11 +384,18 @@ jobs:
           spawn-at-startup "noctalia"
           NIRIEOF
             mkdir -p /etc/systemd/system/multi-user.target.wants
-            ln -sf /etc/systemd/system/niri-panvk.service \
-              /etc/systemd/system/multi-user.target.wants/niri-panvk.service
+            # Desktop stays opt-in until GPU lifecycle validation passes.
+            systemd-analyze verify /etc/systemd/system/niri-panvk.service
+            niri validate -c /root/.config/niri/config.kdl
             sed -i "s/^MODULES=.*/MODULES=(virtio_pci virtio_blk virtio_net virtio_gpu gunyah_guest ext4)/" /etc/mkinitcpio.conf
             grep -q "virtio_blk" /etc/mkinitcpio.conf
             mkinitcpio -P
+            test -x /sbin/init
+            modinfo -k "$kver" -F filename virtio_gpu
+            modinfo -k "$kver" -F vermagic virtio_gpu
+            lsinitcpio /boot/initramfs-linux.img > /opt/panvk/initramfs-files.txt
+            grep -E "virtio[-_]gpu.*ko" /opt/panvk/initramfs-files.txt
+            pacman -Q > /opt/panvk/packages.txt
             ls -la /boot
             gpgconf --kill all || true
             GNUPGHOME=/etc/pacman.d/gnupg gpgconf --kill all || true
@@ -350,11 +403,19 @@ jobs:
           sudo cp root/boot/Image Image
           sudo cp root/boot/initramfs-linux.img initramfs-linux.img
           sudo chmod 644 Image initramfs-linux.img
-          sudo umount -l root/dev root/proc root/sys 2>/dev/null || true
+          mkdir -p validation
+          sudo cp root/opt/panvk/*-ldd.txt root/opt/panvk/initramfs-files.txt root/opt/panvk/packages.txt validation/
+          git -C ../mesa rev-parse HEAD > validation/mesa-revision.txt
+          git -C additions rev-parse HEAD > validation/guest-additions-revision.txt
+          sudo umount root/dev root/proc root/sys
           sync
-          sudo umount root || { sudo umount -l root || true; sleep 2; }
-          sudo umount root || { sudo umount -l root || true; sleep 2; }
-          sudo e2fsck -f -y root.img || true
+          sudo umount root
+          set +e
+          sudo e2fsck -f -p root.img
+          fsck_rc=$?
+          set -e
+          test "$fsck_rc" -le 1
+          sudo e2fsck -f -n root.img
           qemu-img convert -f raw -O qcow2 -c root.img root.qcow2
           sha256sum root.qcow2 Image initramfs-linux.img > SHA256SUMS
           ls -la
@@ -370,7 +431,18 @@ jobs:
             rootwork/Image
             rootwork/initramfs-linux.img
             rootwork/SHA256SUMS
+            rootwork/validation/
             payload/opt/libvulkan_manet.so
             payload/opt/panvk_icd.json
             payload/opt/panvk_compute_probe
           if-no-files-found: error
+      - name: Upload validation evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: panvk-validation-42170346983
+          path: |
+            rootwork/validation/
+            payload/probe.c
+            rootwork/root/opt/panvk/*-ldd.txt
+          if-no-files-found: warn
