@@ -86,6 +86,7 @@ public final class InputBroker {
             new Thread(() -> {
                 while (true) try {
                     LocalSocket peer = server.accept();
+                    if (peer.getPeerCredentials().getUid() != 0) { peer.close(); continue; }
                     synchronized (InputBroker.class) {
                         if (peers[ch] != null) peers[ch].close();
                         peers[ch] = peer;
