@@ -98,6 +98,9 @@ jobs:
                   }'''
           assert s.count(old) == 1
           s = s.replace(old, new)
+          old = 'if size <= 65536 && resource.blob_id == 0 {'
+          assert s.count(old) == 1
+          s = s.replace(old, 'if !self.fixed_blob_mapping && size <= 65536 && resource.blob_id == 0 {')
           p.write_text(s)
           PY
           git -C source diff --check
