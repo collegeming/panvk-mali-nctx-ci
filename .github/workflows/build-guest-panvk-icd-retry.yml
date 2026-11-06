@@ -231,18 +231,30 @@ jobs:
                 goto out_unlock;'''
           replace(p, old, new)
           p = Path('mesa/src/panfrost/vulkan/panvk_physical_device.c')
-          replace(p, '#include "panvk_device.h"', '#include "panvk_device.h"\n#include "kmod/mali_kbase_virtio.h"')
+          replace(p, '#include "panvk_device.h"', '#include "panvk_device.h"\n#include "kmod/mali_kbase_virtio.h"\n#include <xf86drm.h>')
           old = '''   /* Preferred path: a kernel sync_file produced by a KCPU queue that waits'''
           new = '''   /* The virtio transport cannot pass host KCPU fence fds to the guest.
-              * Complete the real GPU wait before exporting the -1 signaled-fence
-              * sentinel. This is synchronous, but never reports unfinished work. */
+              * Complete the GPU wait, then export a real guest sync-file from
+              * a signaled DRM syncobj. This never reports unfinished work. */
              if (kbv_has(dev->kmod.dev->fd)) {
                 struct vk_sync_wait wait = {.sync = sync, .wait_value = 0};
                 VkResult result = kbase_cpu_sync_wait_many(device, 1, &wait,
                    VK_SYNC_WAIT_COMPLETE, UINT64_MAX);
                 if (result != VK_SUCCESS)
                    return result;
-                *sync_file = -1;
+                uint32_t handle = 0;
+                int fd = -1;
+                int ret = drmSyncobjCreate(dev->kmod.dev->fd,
+                   DRM_SYNCOBJ_CREATE_SIGNALED, &handle);
+                if (ret)
+                   return vk_errorf(device, VK_ERROR_OUT_OF_HOST_MEMORY,
+                                    "virtio syncobj create failed: %d", ret);
+                ret = drmSyncobjExportSyncFile(dev->kmod.dev->fd, handle, &fd);
+                drmSyncobjDestroy(dev->kmod.dev->fd, handle);
+                if (ret || fd < 0)
+                   return vk_errorf(device, VK_ERROR_OUT_OF_HOST_MEMORY,
+                                    "virtio sync-file export failed: %d", ret);
+                *sync_file = fd;
                 return VK_SUCCESS;
              }
 
