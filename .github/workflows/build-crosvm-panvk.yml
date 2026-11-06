@@ -101,6 +101,14 @@ jobs:
           old = 'if size <= 65536 && resource.blob_id == 0 {'
           assert s.count(old) == 1
           s = s.replace(old, 'if !self.fixed_blob_mapping && size <= 65536 && resource.blob_id == 0 {')
+          old = '            let queryable = rutabaga.query(resource.resource_id).is_ok();'
+          new = '''            // Native-context BOs contain the actual GPU-written linear scanout.
+                      // Virgl's successful export query does not make transfer_read valid.
+                      let native_blob = resource.blob_id != 0
+                          && std::env::var_os("VKR_TEST_KBASE_NATIVE").is_some();
+                      let queryable = !native_blob && rutabaga.query(resource.resource_id).is_ok();'''
+          assert s.count(old) == 1
+          s = s.replace(old, new)
           p.write_text(s)
           p = Path('source/src/crosvm/sys/linux.rs')
           s = p.read_text()
