@@ -1,6 +1,9 @@
 name: PanVK isolated native input
 on:
   workflow_dispatch:
+  push:
+    branches: [panvk/native-input-v1]
+    paths: ['native-input/**', '.github/workflows/build-panvk-native-input.yml']
 permissions:
   contents: read
 jobs:
