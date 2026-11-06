@@ -19,6 +19,7 @@ public final class InputBroker {
     static final String BASE = "/data/local/tmp/panvk-stability-v1/input";
     static final String DISPLAY = "droidvm_disp_panvk_stability_native_gpu-0";
     private static final LocalSocket[] peers = new LocalSocket[4];
+    private static final LocalSocket[] listeners = new LocalSocket[4];
     private static final Set<Integer>[] keys = new Set[]{new HashSet<>(), new HashSet<>(), new HashSet<>(), new HashSet<>()};
     private static long batches;
 
@@ -73,14 +74,15 @@ public final class InputBroker {
             throw new SecurityException("package UID mismatch");
         for (int i = 0; i < 4; i++) {
             final int ch = i;
-            try { android.system.Os.unlink(BASE + ch + ".sock"); }
-            catch (android.system.ErrnoException e) { if (e.errno != android.system.OsConstants.ENOENT) throw e; }
+            java.io.File stale = new java.io.File(BASE + ch + ".sock");
+            if (stale.exists() && !stale.delete()) throw new java.io.IOException("stale socket: " + stale);
         }
         // LocalServerSocket(String) uses the abstract namespace; file-backed sockets use bind + fd.
         for (int i = 0; i < 4; i++) {
             final int ch = i;
             LocalSocket listener = new LocalSocket();
             listener.bind(new android.net.LocalSocketAddress(BASE + ch + ".sock", android.net.LocalSocketAddress.Namespace.FILESYSTEM));
+            listeners[ch] = listener;
             LocalServerSocket server = new LocalServerSocket(listener.getFileDescriptor());
             new Thread(() -> {
                 while (true) try {
