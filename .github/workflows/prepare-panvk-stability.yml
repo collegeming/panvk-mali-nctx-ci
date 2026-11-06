@@ -1,0 +1,147 @@
+name: prepare-panvk-stability
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.github/workflows/prepare-panvk-stability.yml']
+permissions:
+  contents: write
+  actions: write
+concurrency:
+  group: panvk-stability-preparation
+  cancel-in-progress: false
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply source and rootfs verification changes in CI
+        run: |
+          set -eux
+          git switch -c panvk/stability-v1
+          python3 - <<'PY'
+          import pathlib
+          p = pathlib.Path('.github/workflows/build-guest-panvk-rootfs.yml')
+          s = p.read_text()
+          def rep(old, new):
+              global s
+              assert s.count(old) == 1, (old[:100], s.count(old))
+              s = s.replace(old, new, 1)
+          rep('    steps:\n', '''    steps:
+                - uses: actions/checkout@v4
+                  with:
+                    persist-credentials: false
+          ''')
+          rep('      - name: Build PanVK with kbase virtio kmod\n', '''      - name: Apply the shared PanVK fixes
+                  run: |
+                    set -eux
+                    python3 scripts/panvk-icd-diagnostics.py mesa
+                    python3 scripts/panvk-icd-devcreate.py mesa
+                - name: Build PanVK with kbase virtio kmod
+          ''')
+          rep('          int main(void) {', '          static int run_once(unsigned iteration) {\n            printf("iteration=%u create\\n", iteration);')
+          rep('''            vkUnmapMemory(dev, mem);
+                      return val == 0x12345678u ? 0 : 5;
+                    }
+                    C''', '''            vkUnmapMemory(dev, mem);
+                      vkDestroyFence(dev, fence, NULL);
+                      vkDestroyCommandPool(dev, cp, NULL);
+                      vkDestroyDescriptorPool(dev, dp, NULL);
+                      vkDestroyPipeline(dev, pipe, NULL);
+                      vkDestroyPipelineLayout(dev, pl, NULL);
+                      vkDestroyDescriptorSetLayout(dev, dsl, NULL);
+                      vkDestroyShaderModule(dev, sm, NULL);
+                      vkDestroyBuffer(dev, buf, NULL);
+                      vkFreeMemory(dev, mem, NULL);
+                      printf("iteration=%u destroy-device\\n", iteration); fflush(stdout);
+                      vkDestroyDevice(dev, NULL);
+                      vkDestroyInstance(inst, NULL);
+                      free(q); free(pds);
+                      printf("iteration=%u destroyed\\n", iteration); fflush(stdout);
+                      return val == 0x12345678u ? 0 : 5;
+                    }
+                    int main(int argc, char **argv) {
+                      char *end = NULL;
+                      unsigned long count = 1;
+                      setvbuf(stdout, NULL, _IONBF, 0);
+                      if (argc > 2) return 64;
+                      if (argc == 2) {
+                        count = strtoul(argv[1], &end, 10);
+                        if (!*argv[1] || *end || count < 1 || count > 100) return 64;
+                      }
+                      for (unsigned i = 1; i <= count; ++i) {
+                        int ret = run_once(i);
+                        if (ret) return ret;
+                      }
+                      printf("LIFECYCLE PASS iterations=%lu\\n", count);
+                      return 0;
+                    }
+                    C''')
+          rep('            systemctl enable serial-getty@ttyS0', '''            /usr/lib/systemd/systemd --version
+                      /usr/bin/niri --version
+                      /usr/bin/noctalia --help
+                      ldd /usr/lib/systemd/systemd > /opt/panvk/systemd-ldd.txt
+                      ldd /opt/panvk/libvulkan_manet.so > /opt/panvk/panvk-ldd.txt
+                      ! grep -q "not found" /opt/panvk/*-ldd.txt
+                      systemctl enable serial-getty@ttyS0''')
+          rep('          Environment=VK_DRIVER_FILES=/opt/panvk/panvk_icd.json', '''          Environment=VK_DRIVER_FILES=/opt/panvk/panvk_icd.json
+                    Environment=MESA_LOADER_DRIVER_OVERRIDE=zink''')
+          rep('''            ln -sf /etc/systemd/system/niri-panvk.service \\
+                        /etc/systemd/system/multi-user.target.wants/niri-panvk.service''', '''            # Desktop stays opt-in until GPU lifecycle validation passes.
+                      systemd-analyze verify /etc/systemd/system/niri-panvk.service
+                      niri validate -c /root/.config/niri/config.kdl''')
+          rep('''            mkinitcpio -P
+                      ls -la /boot''', '''            mkinitcpio -P
+                      test -x /sbin/init
+                      modinfo -k "$kver" -F filename virtio_gpu
+                      modinfo -k "$kver" -F vermagic virtio_gpu
+                      lsinitcpio /boot/initramfs-linux.img > /opt/panvk/initramfs-files.txt
+                      grep -E "virtio[-_]gpu.*ko" /opt/panvk/initramfs-files.txt
+                      pacman -Q > /opt/panvk/packages.txt
+                      ls -la /boot''')
+          old = '''          sudo umount -l root/dev root/proc root/sys 2>/dev/null || true
+                    sync
+                    sudo umount root || { sudo umount -l root || true; sleep 2; }
+                    sudo umount root || { sudo umount -l root || true; sleep 2; }
+                    sudo e2fsck -f -y root.img || true'''
+          new = '''          mkdir -p validation
+                    sudo cp root/opt/panvk/*-ldd.txt root/opt/panvk/initramfs-files.txt root/opt/panvk/packages.txt validation/
+                    git -C ../mesa rev-parse HEAD > validation/mesa-revision.txt
+                    git -C additions rev-parse HEAD > validation/guest-additions-revision.txt
+                    sudo umount root/dev root/proc root/sys
+                    sync
+                    sudo umount root
+                    set +e
+                    sudo e2fsck -f -p root.img
+                    fsck_rc=$?
+                    set -e
+                    test "$fsck_rc" -le 1
+                    sudo e2fsck -f -n root.img'''
+          rep(old, new)
+          rep('''            rootwork/SHA256SUMS
+          ''', '''            rootwork/SHA256SUMS
+                      rootwork/validation/
+          ''')
+          s += '''      - name: Upload validation evidence even on failure
+                  if: always()
+                  uses: actions/upload-artifact@v4
+                  with:
+                    name: panvk-validation-${{ github.run_id }}
+                    path: |
+                      rootwork/validation/
+                      payload/probe.c
+                      rootwork/root/opt/panvk/*-ldd.txt
+                    if-no-files-found: warn
+          '''
+          p.write_text(s)
+          PY
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/workflows/build-guest-panvk-rootfs.yml
+          git commit -m 'panvk: unify ICD fixes and gate rootfs with lifecycle and boot checks'
+          git push origin HEAD:refs/heads/panvk/stability-v1
+      - name: Build isolated stability image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run build-guest-panvk-rootfs.yml --ref panvk/stability-v1
