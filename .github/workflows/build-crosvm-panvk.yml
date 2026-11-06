@@ -53,6 +53,46 @@ jobs:
           path: source
           persist-credentials: false
 
+      - name: Preserve mapper state until unregister succeeds
+        run: |
+          set -eux
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('source/devices/src/virtio/virtio_pci_device.rs')
+          s = p.read_text()
+          old = 'if let Some(old_id) = self.mappings.remove(&offset) {'
+          assert s.count(old) == 2
+          s = s.replace(old, 'if let Some(old_id) = self.mappings.get(&offset).copied() {')
+          old = '.context("unregister_memory of replaced mapping failed")?;'
+          assert s.count(old) == 2
+          s = s.replace(old, old + '\n            self.mappings.remove(&offset);')
+          old = '''        let id = self.mappings.remove(&offset).context("invalid offset")?;
+                  self.vm_memory_client
+                      .unregister_memory(id)
+                      .context("unregister_memory failed")'''
+          new = '''        let id = self.mappings.get(&offset).copied().context("invalid offset")?;
+                  self.vm_memory_client
+                      .unregister_memory(id)
+                      .with_context(|| format!("unregister_memory failed at BAR offset {:#x}", offset))?;
+                  self.mappings.remove(&offset);
+                  Ok(())'''
+          assert s.count(old) == 1
+          p.write_text(s.replace(old, new))
+          p = Path('source/devices/src/virtio/gpu/virtio_gpu.rs')
+          s = p.read_text()
+          import re
+          pattern = r'(\.remove_mapping\(shmem_offset\)\s*)\.map_err\(\|_\| ErrUnspec\)\?;'
+          s, count = re.subn(pattern, lambda m: m[1] + '''.map_err(|e| {
+                              base::error!("PANVK-UNMAP: resource={} offset={:#x} error={:#}", resource_id, shmem_offset, e);
+                              ErrUnspec
+                          })?;''', s)
+          assert count == 2, count
+          p.write_text(s)
+          PY
+          git -C source diff --check
+          mkdir -p out
+          git -C source diff > out/panvk-mapper-retry.patch
+
       - name: Checkout minijail
         uses: actions/checkout@v4
         with:
