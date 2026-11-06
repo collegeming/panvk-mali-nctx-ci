@@ -17,6 +17,9 @@ public final class MainActivity extends Activity {
     private InputForwarder input;
     private NativeSurfaceSource source;
     private SurfaceView surface;
+    private SurfaceView cursor;
+    private volatile boolean accepting;
+    private final Object inputGate = new Object();
     private TextView status;
     private InputMode mode = InputMode.TOUCH;
     private boolean resumed;
@@ -34,10 +37,14 @@ public final class MainActivity extends Activity {
             disconnect();
             broker = IInputBroker.Stub.asInterface(binder); token = next;
             try { broker.watch(token, lifetime); } catch (Exception e) { status.setText(e.toString()); return; }
+            final IInputBroker activeBroker = broker;
+            final String activeToken = token;
             input = new InputForwarder((channel, data) -> {
-                if (!resumed) return false;
-                try { return broker.write(token, channel, data); }
-                catch (Exception e) { return false; }
+                synchronized(inputGate) {
+                    if (!accepting) return false;
+                    try { return activeBroker.write(activeToken, channel, data); }
+                    catch (Exception e) { return false; }
+                }
             });
             input.setInputMode(mode);
             source = new NativeSurfaceSource(surface, 2272, 1514, () -> {
@@ -46,6 +53,12 @@ public final class MainActivity extends Activity {
                 public void onContentSize(int w, int h) { fitSurface(); }
                 public void onStateChanged(DisplaySource.State state) { status.setText("PanVK native · " + state + " · " + mode); }
             });
+            source.setCursorView(cursor);
+            source.setCursorListener((x,y) -> {
+                cursor.setX(surface.getX() + x * surface.getWidth() / 2272f);
+                cursor.setY(surface.getY() + y * surface.getHeight() / 1514f);
+            });
+            accepting = resumed && hasWindowFocus();
         }
     };
 
@@ -60,10 +73,15 @@ public final class MainActivity extends Activity {
         switchMode.setOnClickListener(v -> {
             release(); mode = InputMode.values()[(mode.ordinal() + 1) % 3];
             if (input != null) input.setInputMode(mode);
+            accepting = resumed && hasWindowFocus();
             status.setText("PanVK native · " + mode);
         }); bar.addView(switchMode); root.addView(bar);
         FrameLayout area = new FrameLayout(this); area.setBackgroundColor(0xff000000);
         surface = new SurfaceView(this); area.addView(surface, new FrameLayout.LayoutParams(1, 1, Gravity.CENTER));
+        cursor = new SurfaceView(this); cursor.setZOrderMediaOverlay(true);
+        cursor.getHolder().setFormat(android.graphics.PixelFormat.TRANSLUCENT);
+        cursor.setX(-10000); cursor.setY(-10000);
+        area.addView(cursor,new FrameLayout.LayoutParams(64,64));
         area.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob) -> fitSurface());
         surface.setOnTouchListener((v,event) -> {
             if (input == null || !resumed || surface.getWidth() <= 0) return false;
@@ -125,10 +143,15 @@ public final class MainActivity extends Activity {
             if(input.sendKeyEvent(e.getKeyCode(),e.getAction()==KeyEvent.ACTION_DOWN)) return true;
         return super.dispatchKeyEvent(e);
     }
-    private void release() { IInputBroker b=broker;String t=token; if(b!=null)io.execute(()->{try{b.releaseAll(t);}catch(Exception ignored){}}); buttons=0;haveMouse=false; }
+    private void release() {
+        IInputBroker b=broker;String t=token;
+        synchronized(inputGate) { accepting=false; }
+        if(b!=null)io.execute(()->{synchronized(inputGate){try{b.releaseAll(t);}catch(Exception ignored){}}});
+        buttons=0;haveMouse=false;
+    }
     private void disconnect(){release();if(input!=null)input.close();if(source!=null)source.shutdown();input=null;source=null;broker=null;}
-    public void onWindowFocusChanged(boolean focus){super.onWindowFocusChanged(focus);if(!focus)release();}
-    protected void onResume(){super.onResume();resumed=true;}
+    public void onWindowFocusChanged(boolean focus){super.onWindowFocusChanged(focus);if(!focus)release();else accepting=resumed;}
+    protected void onResume(){super.onResume();resumed=true;accepting=hasWindowFocus();}
     protected void onPause(){resumed=false;release();super.onPause();}
     protected void onDestroy(){unregisterReceiver(receiver);disconnect();io.shutdown();super.onDestroy();}
 }
