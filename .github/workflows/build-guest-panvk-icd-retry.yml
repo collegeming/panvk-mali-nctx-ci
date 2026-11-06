@@ -230,6 +230,35 @@ jobs:
                 }
                 goto out_unlock;'''
           replace(p, old, new)
+          p = Path('mesa/src/panfrost/lib/kmod/kbase_kmod.c')
+          marker = 'static int\nkbase_kmod_bo_export_fd(struct pan_kmod_bo *bo)'
+          helper = '''int
+          kbase_kmod_sync_exported(struct pan_kmod_dev *dev)
+          {
+             if (!kbv_has(dev->fd)) return 0;
+             struct kbase_kmod_dev *kdev = container_of(dev, struct kbase_kmod_dev, base);
+             int ret = 0;
+             simple_mtx_lock(&dev->handle_to_bo.lock);
+             uint32_t limit = p_atomic_read(&kdev->next_handle);
+             for (uint32_t i = 1; i <= limit; ++i) {
+                struct pan_kmod_bo **slot = util_sparse_array_get(&dev->handle_to_bo.array, i);
+                if (!slot || !*slot) continue;
+                struct kbase_kmod_bo *bo = container_of(*slot, struct kbase_kmod_bo, base);
+                if (!bo->virtio_handle || bo->dmabuf_fd < 0) continue;
+                if (kbv_bo_sync(dev->fd, bo->virtio_handle, 0, bo->base.size,
+                                BASE_SYNCSET_OP_CSYNC)) {
+                   ret = -1;
+                   break;
+                }
+             }
+             simple_mtx_unlock(&dev->handle_to_bo.lock);
+             return ret;
+          }
+
+          '''
+          replace(p, marker, helper + marker)
+          p = Path('mesa/src/panfrost/lib/kmod/kbase_kmod.h')
+          p.write_text(p.read_text() + '\nint kbase_kmod_sync_exported(struct pan_kmod_dev *dev);\n')
           p = Path('mesa/src/panfrost/vulkan/panvk_physical_device.c')
           replace(p, '#include "panvk_device.h"', '#include "panvk_device.h"\n#include "kmod/mali_kbase_virtio.h"\n#include <xf86drm.h>')
           old = '''   /* Preferred path: a kernel sync_file produced by a KCPU queue that waits'''
@@ -242,6 +271,9 @@ jobs:
                    VK_SYNC_WAIT_COMPLETE, UINT64_MAX);
                 if (result != VK_SUCCESS)
                    return result;
+                if (kbase_kmod_sync_exported(dev->kmod.dev))
+                   return vk_errorf(device, VK_ERROR_DEVICE_LOST,
+                                    "virtio exported BO readback failed");
                 uint32_t handle = 0;
                 int fd = -1;
                 int ret = drmSyncobjCreate(dev->kmod.dev->fd,
