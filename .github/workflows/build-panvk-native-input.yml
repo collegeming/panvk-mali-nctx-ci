@@ -1,0 +1,50 @@
+name: PanVK isolated native input
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: collegeming/DroidVM
+          ref: 37d7227a3268ca70f72f297bb6524d50621b19d7
+          path: droidvm-source
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-35 build-tools;35.0.0'
+      - name: Assemble isolated sources
+        run: python3 -I native-input/prepare.py droidvm-source native-input
+      - name: Compile and package (separate application ID)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          BT="$ANDROID_HOME/build-tools/35.0.0"
+          API="$ANDROID_HOME/platforms/android-35/android.jar"
+          mkdir -p out/gen out/classes
+          "$BT/aidl" -I"native-input/src" -p"$ANDROID_HOME/platforms/android-35/framework.aidl" -oout/gen native-input/src/android/crosvm/DisplayConfig.aidl
+          "$BT/aidl" -I"native-input/src" -p"$ANDROID_HOME/platforms/android-35/framework.aidl" -oout/gen native-input/src/android/crosvm/ICrosvmAndroidDisplayService.aidl
+          "$BT/aidl" -I"native-input/src" -p"$ANDROID_HOME/platforms/android-35/framework.aidl" -oout/gen native-input/src/io/github/collegeming/panvk/IInputBroker.aidl
+          find native-input/src out/gen -name '*.java' > out/sources.txt
+          javac -source 11 -target 11 -classpath "$API" -d out/classes @out/sources.txt
+          "$BT/d8" --lib "$API" --min-api 33 --output out $(find out/classes -name '*.class')
+          "$BT/aapt2" link -I "$API" --manifest native-input/AndroidManifest.xml -o out/unsigned.apk
+          (cd out && zip unsigned.apk classes.dex)
+          keytool -genkeypair -keystore out/test.jks -storepass android -keypass android -alias panvk -keyalg RSA -validity 3650 -dname 'CN=PanVK isolated test'
+          "$BT/zipalign" -f 4 out/unsigned.apk out/aligned.apk
+          "$BT/apksigner" sign --ks out/test.jks --ks-pass pass:android --out out/panvk-native-input.apk out/aligned.apk
+          "$BT/apksigner" verify --verbose out/panvk-native-input.apk
+          sha256sum out/panvk-native-input.apk | tee out/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: panvk-isolated-native-input
+          path: |
+            out/panvk-native-input.apk
+            out/SHA256SUMS
