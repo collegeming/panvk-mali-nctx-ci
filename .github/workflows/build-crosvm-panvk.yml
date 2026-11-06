@@ -152,6 +152,23 @@ jobs:
                       if resource.scanout_blob_map.is_none() && !queryable {'''
           assert s.count(old) == 1
           s = s.replace(old, new)
+          old = '''                let outcome = display.present_frame(surface_id, &frame);
+                          strace!("flush.blob.copy.end");'''
+          new = '''                let outcome = display.present_frame(surface_id, &frame);
+                          if native_blob {
+                              static PROBES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+                              let n = PROBES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                              if n < 12 {
+                                  let sample = &src[src_offset.min(src.len())..];
+                                  let nonzero = sample.iter().step_by(4093).filter(|b| **b != 0).count();
+                                  base::warn!("PANVK-PRESENT: res={} blob={} bytes={} stride={} format={:#x} sample_nonzero={} flipped={}",
+                                      resource.resource_id, resource.blob_id, sample.len(), src_stride,
+                                      data.drm_format.0, nonzero, matches!(outcome, PresentOutcome::Flipped));
+                              }
+                          }
+                          strace!("flush.blob.copy.end");'''
+          assert s.count(old) == 1
+          s = s.replace(old, new)
           p.write_text(s)
           p = Path('source/src/crosvm/sys/linux.rs')
           s = p.read_text()
