@@ -24,8 +24,7 @@ public final class InputBroker {
     private static long batches;
 
     private static synchronized boolean send(int channel, byte[] data) {
-        if (channel < 0 || channel >= 4 || data == null || data.length == 0
-                || data.length > 16384 || data.length % 8 != 0 || peers[channel] == null) return false;
+        if (!InputPolicy.validBatch(channel, data) || peers[channel] == null) return false;
         try {
             OutputStream out = peers[channel].getOutputStream();
             out.write(data);
@@ -104,7 +103,7 @@ public final class InputBroker {
             .getMethod("checkService", String.class).invoke(null, DISPLAY);
         final IInputBroker.Stub broker = new IInputBroker.Stub() {
             private void check(String supplied) {
-                if (Binder.getCallingUid() != uid || !token.equals(supplied)) throw new SecurityException("session denied");
+                if (!InputPolicy.authorized(Binder.getCallingUid(), uid, token, supplied)) throw new SecurityException("session denied");
             }
             public IBinder display(String supplied) throws android.os.RemoteException {
                 check(supplied);

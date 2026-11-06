@@ -107,7 +107,7 @@ public final class MainActivity extends Activity {
     private boolean mouse(MotionEvent e) {
         if(input==null||!resumed)return false;
         float x=e.getX(),y=e.getY();
-        if(mode==InputMode.TABLET) input.sendAbsMove((int)(Math.max(0,Math.min(surface.getWidth()-1,x))*32767/Math.max(1,surface.getWidth()-1)),(int)(Math.max(0,Math.min(surface.getHeight()-1,y))*32767/Math.max(1,surface.getHeight()-1)));
+        if(mode==InputMode.TABLET) input.sendAbsMove(InputPolicy.absolute(x,surface.getWidth()),InputPolicy.absolute(y,surface.getHeight()));
         else if(haveMouse) input.sendMouseMove(Math.round(x-lastX),Math.round(y-lastY));
         lastX=x;lastY=y;haveMouse=true;
         int next=e.getButtonState();

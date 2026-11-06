@@ -23,6 +23,11 @@ jobs:
       - uses: android-actions/setup-android@v3
         with:
           packages: 'platforms;android-35 build-tools;35.0.0'
+      - name: Test input policy without Android stubs
+        run: |
+          mkdir -p policy-test
+          javac -d policy-test native-input/src/io/github/collegeming/panvk/InputPolicy.java native-input/test/io/github/collegeming/panvk/InputPolicyTest.java
+          java -cp policy-test io.github.collegeming.panvk.InputPolicyTest
       - name: Assemble isolated sources
         run: python3 -I native-input/prepare.py droidvm-source native-input
       - name: Compile and package (separate application ID)
