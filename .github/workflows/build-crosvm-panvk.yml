@@ -87,6 +87,17 @@ jobs:
                               ErrUnspec
                           })?;''', s)
           assert count == 2, count
+          old = '''        if resource.persist_offset.take().is_some() {
+                      return Ok(OkNoData);
+                  }'''
+          new = '''        if resource.persist_offset.is_some() {
+                      // The stable page belongs to the VM, not this resource. Keep the
+                      // marker until UNREF so it cannot unregister a later user's page.
+                      resource.shmem_offset = None;
+                      return Ok(OkNoData);
+                  }'''
+          assert s.count(old) == 1
+          s = s.replace(old, new)
           p.write_text(s)
           PY
           git -C source diff --check
