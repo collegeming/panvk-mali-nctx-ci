@@ -28,6 +28,7 @@ printf '%s  %s\n' 8e93db0c909f41a7b1b0f723a010f7f1c97b5faea01e65a26d8c38d168c4d5
 # Extract only required official package build files and sound/virtio sources.
 python -I - <<'PY'
 from pathlib import Path, PurePosixPath
+import posixpath
 import tarfile
 
 def extract(archive, prefix, dest):
@@ -37,7 +38,11 @@ def extract(archive, prefix, dest):
             p=PurePosixPath(m.name)
             assert not p.is_absolute() and '..' not in p.parts and '\\' not in m.name and ':' not in m.name
             if m.name == prefix.rstrip('/') or m.name.startswith(prefix):
-                assert m.isfile() or m.isdir(), ('Unexpected special file', m.name)
+                assert m.isfile() or m.isdir() or m.issym(), ('Unexpected special file', m.name)
+                if m.issym():
+                    assert not m.linkname.startswith('/') and '\\' not in m.linkname and ':' not in m.linkname
+                    resolved=posixpath.normpath(posixpath.join(posixpath.dirname(m.name), m.linkname))
+                    assert resolved.startswith(prefix), ('Link escapes build directory', m.name, m.linkname)
                 selected.append(m)
         assert selected
         tar.extractall(dest, members=selected, filter='data')
