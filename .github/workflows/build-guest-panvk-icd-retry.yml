@@ -230,6 +230,24 @@ jobs:
                 }
                 goto out_unlock;'''
           replace(p, old, new)
+          p = Path('mesa/src/panfrost/vulkan/panvk_physical_device.c')
+          replace(p, '#include "panvk_device.h"', '#include "panvk_device.h"\n#include "kmod/mali_kbase_virtio.h"')
+          old = '''   /* Preferred path: a kernel sync_file produced by a KCPU queue that waits'''
+          new = '''   /* The virtio transport cannot pass host KCPU fence fds to the guest.
+              * Complete the real GPU wait before exporting the -1 signaled-fence
+              * sentinel. This is synchronous, but never reports unfinished work. */
+             if (kbv_has(dev->kmod.dev->fd)) {
+                struct vk_sync_wait wait = {.sync = sync, .wait_value = 0};
+                VkResult result = kbase_cpu_sync_wait_many(device, 1, &wait,
+                   VK_SYNC_WAIT_COMPLETE, UINT64_MAX);
+                if (result != VK_SUCCESS)
+                   return result;
+                *sync_file = -1;
+                return VK_SUCCESS;
+             }
+
+             /* Preferred path: a kernel sync_file produced by a KCPU queue that waits'''
+          replace(p, old, new)
           PY
           git -C mesa diff --check
       - name: Build PanVK with kbase virtio kmod
