@@ -331,6 +331,36 @@ jobs:
           print('patches applied')
           PY
 
+      - name: Checkout pinned VNC headers
+        uses: actions/checkout@v4
+        with:
+          repository: LibVNC/libvncserver
+          ref: 9b54b1ec32731bd23158ca014dc18014db4194c3
+          path: libvncserver-source
+          persist-credentials: false
+      - name: Build VNC display bridge
+        run: |
+          set -eux
+          sudo apt-get install -y aria2
+          mkdir -p downloads/vnc-apk extracted/vnc-apk
+          aria2c -x16 -s16 -d downloads/vnc-apk -o droidvm.apk https://github.com/Droid-VM/DroidVM/releases/download/0.0.6/DroidVM-v0.0.6.apk
+          printf '%s  %s\n' 9c0b80c2be0717e8adcc768cdcc910d89443250fedaa9350574fad1df5af5b2c downloads/vnc-apk/droidvm.apk | sha256sum -c -
+          unzip -q downloads/vnc-apk/droidvm.apk 'lib/arm64-v8a/libvncserver.so' -d extracted/vnc-apk
+          cp extracted/vnc-apk/lib/arm64-v8a/libvncserver.so native-libs/
+          python3 - <<'PY'
+          from pathlib import Path
+          features = 'ALLOW24BPP HAVE_DIRENT_H HAVE_ENDIAN_H HAVE_FCNTL_H HAVE_GETTIMEOFDAY HAVE_GETHOSTBYNAME HAVE_GETHOSTNAME HAVE_INET_NTOA HAVE_LIBPTHREAD HAVE_LIBZ HAVE_MMAP HAVE_NETINET_IN_H HAVE_SELECT HAVE_SOCKET HAVE_STRDUP HAVE_SYS_SOCKET_H HAVE_SYS_STAT_H HAVE_SYS_TIME_H HAVE_SYS_TYPES_H HAVE_SYS_WAIT_H HAVE_SYS_UIO_H HAVE_UNISTD_H HAVE_FORK HAVE_WORKING_FORK IPv6'.split()
+          cfg = '#ifndef _RFB_RFBCONFIG_H\n#define _RFB_RFBCONFIG_H 1\n'
+          cfg += ''.join('#define LIBVNCSERVER_' + f + ' 1\n' for f in features)
+          cfg += '#define LIBVNCSERVER_PACKAGE_STRING "LibVNCServer 0.9.15"\n#define LIBVNCSERVER_PACKAGE_VERSION "0.9.15"\n#define LIBVNCSERVER_VERSION "0.9.15"\n#define LIBVNCSERVER_VERSION_MAJOR "0"\n#define LIBVNCSERVER_VERSION_MINOR "9"\n#define LIBVNCSERVER_VERSION_PATCHLEVEL "15"\n'
+          cfg += '#define HAVE_LIBVNCSERVER_PID_T 1\n#define HAVE_LIBVNCSERVER_SIZE_T 1\n#define HAVE_LIBVNCSERVER_SOCKLEN_T 1\n#endif\n'
+          Path('libvncserver-source/include/rfb/rfbconfig.h').write_text(cfg)
+          PY
+          for name in vnc_server_bridge vnc_h264_rfb; do
+            "$TC/bin/aarch64-linux-android33-clang" -std=gnu11 -fPIC -O2 -DANDROID -Ilibvncserver-source/include -Isource/gpu_display/src -c "source/gpu_display/src/$name.c" -o "$name.o"
+          done
+          "$TC/bin/llvm-ar" rcs native-libs/libvnc_server_bridge.a vnc_server_bridge.o vnc_h264_rfb.o
+
       - name: Cargo build crosvm (aarch64-linux-android)
         shell: bash
         run: |
@@ -343,11 +373,11 @@ jobs:
           export MINIJAIL_BINDGEN_TARGET=aarch64-linux-android33
           export BINDGEN_EXTRA_CLANG_ARGS="--sysroot=$TC/sysroot"
           export PKG_CONFIG_PATH="$PWD/native-prefix/lib/pkgconfig"
-          export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-L native=$PWD/native-libs -L native=$PWD/out -C link-arg=-Wl,-rpath,\$ORIGIN/../lib"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-L native=$PWD/native-libs -L native=$PWD/out -l static=vnc_server_bridge -l dylib=vncserver -C link-arg=-Wl,-rpath,\$ORIGIN/../lib"
           cd source
           cargo +"$RUSTUP_TOOLCHAIN" build --locked --release --target aarch64-linux-android \
             --no-default-features \
-            --features 'gpu,virgl_renderer,gunyah,qcow,net,config-file,balloon' \
+            --features 'gpu,virgl_renderer,gunyah,qcow,net,config-file,balloon,vnc' \
             2>&1 | tee ../cargo-build.log
 
       - name: Verify and package
