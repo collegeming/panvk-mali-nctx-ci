@@ -49,6 +49,7 @@ jobs:
             mesa/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c \
             mesa/src/panfrost/vulkan/panvk_device_memory.c
       - name: Retry a fresh control-page blob when a recycled BAR offset reads stale
+        if: ${{ false }}
         run: |
           set -eux
           python3 - <<'PY'
@@ -109,6 +110,7 @@ jobs:
           PY
           sed -n '/struct drm_virtgpu_resource_create_blob blob;/,/^   \*ctx = (struct kbv_ctx)/p' mesa/src/panfrost/lib/kmod/mali_kbase_virtio.c | head -40
       - name: Instrument the transport init path
+        if: ${{ false }}
         run: |
           set -eux
           python3 - <<'PY'
@@ -158,6 +160,78 @@ jobs:
         run: |
           set -eux
           python3 scripts/panvk-icd-devcreate.py mesa
+      - name: Support same-device virtio dma-buf reimport
+        run: |
+          set -eux
+          python3 - <<'PY'
+          from pathlib import Path
+          def replace(p, old, new):
+              s = p.read_text()
+              assert s.count(old) == 1, (str(p), old[:80], s.count(old))
+              p.write_text(s.replace(old, new))
+          p = Path('mesa/src/panfrost/lib/kmod/kbase_kmod.c')
+          old = '''{
+             return kbase_kmod_import_dmabuf(dev, NULL, fd, size, 0, true);
+          }'''
+          new = '''{
+             if (kbv_has(dev->fd)) {
+                uint32_t gem = 0;
+                if (drmPrimeFDToHandle(dev->fd, fd, &gem))
+                   return NULL;
+                struct kbase_kmod_dev *kdev =
+                   container_of(dev, struct kbase_kmod_dev, base);
+                uint32_t limit = p_atomic_read(&kdev->next_handle);
+                /* pan_kmod_bo_import holds handle_to_bo.lock. Synthetic kbase
+                 * handles are not GEM handles: compare the transport identity. */
+                for (uint32_t i = 1; i <= limit; ++i) {
+                   struct pan_kmod_bo **slot =
+                      util_sparse_array_get(&dev->handle_to_bo.array, i);
+                   if (!slot || !*slot)
+                      continue;
+                   struct kbase_kmod_bo *candidate =
+                      container_of(*slot, struct kbase_kmod_bo, base);
+                   if (candidate->virtio_gem != gem)
+                      continue;
+                   if (size != (*slot)->size) {
+                      errno = EINVAL;
+                      return NULL;
+                   }
+                   /* The generic import path takes the reference. */
+                   return *slot;
+                }
+                /* Foreign contexts need a host import protocol, not a guest fd.
+                 * This new GEM handle is ours; existing handles above are not. */
+                drmCloseBufferHandle(dev->fd, gem);
+                mesa_loge("kbase virtio: dma-buf has no BO in this device");
+                errno = ENOTSUP;
+                return NULL;
+             }
+             return kbase_kmod_import_dmabuf(dev, NULL, fd, size, 0, true);
+          }'''
+          replace(p, old, new)
+          old = '''   if (kbase_bo->virtio_handle) {
+                kbv_bo_free'''
+          new = '''   if (kbase_bo->virtio_handle) {
+                if (kbase_bo->dmabuf_fd >= 0)
+                   close(kbase_bo->dmabuf_fd);
+                kbv_bo_free'''
+          replace(p, old, new)
+          p = Path('mesa/src/panfrost/lib/kmod/pan_kmod.c')
+          old = '''      assert(*slot == NULL);
+                *slot = bo;
+                goto out_unlock;'''
+          new = '''      /* An fd backend may resolve an existing BO while this lock is
+                 * held, just like the GEM-handle path below. */
+                if (*slot == bo) {
+                   p_atomic_inc(&bo->refcnt);
+                } else {
+                   assert(*slot == NULL);
+                   *slot = bo;
+                }
+                goto out_unlock;'''
+          replace(p, old, new)
+          PY
+          git -C mesa diff --check
       - name: Build PanVK with kbase virtio kmod
         run: |
           set -eux
