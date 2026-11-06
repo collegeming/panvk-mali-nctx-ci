@@ -102,6 +102,11 @@ jobs:
           assert s.count(old) == 1
           s = s.replace(old, 'if !self.fixed_blob_mapping && size <= 65536 && resource.blob_id == 0 {')
           p.write_text(s)
+          p = Path('source/src/crosvm/sys/linux.rs')
+          s = p.read_text()
+          old = '#[cfg(feature = "vnc")]\nmod simplefb_display;'
+          assert s.count(old) == 1
+          p.write_text(s.replace(old, '#[cfg(any(feature = "vnc", feature = "android_display"))]\nmod simplefb_display;'))
           PY
           git -C source diff --check
           mkdir -p out
