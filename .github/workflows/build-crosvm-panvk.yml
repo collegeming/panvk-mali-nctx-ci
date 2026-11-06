@@ -109,6 +109,49 @@ jobs:
                       let queryable = !native_blob && rutabaga.query(resource.resource_id).is_ok();'''
           assert s.count(old) == 1
           s = s.replace(old, new)
+          old = '''            } else {
+                          source = Some(VmMemorySource::Descriptor {
+                              descriptor,
+                              offset: 0,
+                              size,
+                          });
+                      }
+                  }
+
+                  let res_size = resource.size;'''
+          new = '''            } else {
+                          if resource.blob_id != 0 && std::env::var_os("VKR_TEST_KBASE_NATIVE").is_some() {
+                              resource.backend_fd = descriptor.try_clone().ok();
+                          }
+                          source = Some(VmMemorySource::Descriptor {
+                              descriptor,
+                              offset: 0,
+                              size,
+                          });
+                      }
+                  }
+
+                  let res_size = resource.size;'''
+          assert s.count(old) == 1
+          s = s.replace(old, new)
+          old = '            if resource.scanout_blob_map.is_none() && !queryable {'
+          new = '''            if native_blob && resource.scanout_blob_map.is_none() {
+                          if let Some(ref fd) = resource.backend_fd {
+                              let data = resource.scanout_data.unwrap();
+                              let length = (data.strides[0] as u64)
+                                  .checked_mul(data.height as u64)
+                                  .and_then(|v| v.checked_add(data.offsets[0] as u64))
+                                  .ok_or(ErrUnspec)?;
+                              if length > resource.size { return Err(ErrUnspec); }
+                              resource.scanout_blob_map = Some(
+                                  MemoryMappingBuilder::new(length as usize).from_descriptor(fd)
+                                      .build().map_err(|_| ErrUnspec)?);
+                              note_flush_route("blob: native-context retained descriptor mapped");
+                          }
+                      }
+                      if resource.scanout_blob_map.is_none() && !queryable {'''
+          assert s.count(old) == 1
+          s = s.replace(old, new)
           p.write_text(s)
           p = Path('source/src/crosvm/sys/linux.rs')
           s = p.read_text()
