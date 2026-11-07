@@ -294,6 +294,46 @@ jobs:
           replace(p, old, new)
           PY
           git -C mesa diff --check
+      - name: Make kbase completion-wait slices tunable (P1)
+        run: |
+          set -eux
+          python3 - <<'PY'
+          import pathlib
+          p = pathlib.Path("mesa/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c")
+          s = p.read_text()
+
+          a1 = "   int64_t last_kick = start;\n"
+          b1 = (a1 +
+                "   /* The virtio transport implements each completion wait as\n"
+                "    * poll(kbase_fd, ms) on the host, so the slice is the wake-up\n"
+                "    * quantum of every wait: a fixed 20 ms slice makes a frame that\n"
+                "    * finishes in 3 ms pay 20 ms.  Start at a short floor and double\n"
+                "    * each iteration up to the old 20 ms watchdog ceiling, so short\n"
+                "    * waits stay cheap and long waits do not flood the transport\n"
+                "    * with RPCs. */\n"
+                "   static int64_t slice_floor_ns = -1;\n"
+                "   if (slice_floor_ns < 0) {\n"
+                "      int64_t us = debug_get_num_option(\"PANVK_KBASE_WAIT_SLICE_US\", 1000);\n"
+                "      slice_floor_ns = MIN2(MAX2(us, 100), 20000) * 1000;\n"
+                "   }\n"
+                "   int64_t slice_ns = slice_floor_ns;\n")
+          assert s.count(a1) == 1, "anchor 1 not found"
+          s = s.replace(a1, b1)
+
+          a2 = ("      int64_t remaining = deadline > (uint64_t)now\n"
+                "                             ? MIN2(deadline - (uint64_t)now,\n"
+                "                                    20ull * 1000000ull)\n"
+                "                             : 0;\n")
+          b2 = ("      int64_t remaining = deadline > (uint64_t)now\n"
+                "                             ? MIN2(deadline - (uint64_t)now, slice_ns)\n"
+                "                             : 0;\n"
+                "      slice_ns = MIN2(slice_ns * 2, 20ull * 1000000ull);\n")
+          assert s.count(a2) == 1, "anchor 2 not found"
+          s = s.replace(a2, b2)
+          p.write_text(s)
+          PY
+          grep -q 'PANVK_KBASE_WAIT_SLICE_US' mesa/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c
+          git -C mesa diff -- src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c
       - name: Build PanVK with kbase virtio kmod
         run: |
           set -eux
