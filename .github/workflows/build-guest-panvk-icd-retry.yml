@@ -191,7 +191,12 @@ jobs:
           # Fail closed: no per-frame publish trace in the release ICD. The
           # init-only pvbq: emit/wait traces keep the pvbq prefix on purpose,
           # so match the publish format string rather than the bare prefix.
-          grep -aq "pvbq: publish" out/libvulkan_manet.so && exit 1
+          # Use an if-block: a trailing "grep && exit 1" would itself make the
+          # step fail under set -e when grep does not match (the good case).
+          if grep -aq "pvbq: publish" out/libvulkan_manet.so; then
+            echo "pvbq publish trace leaked into the release ICD" >&2
+            exit 1
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: panvk-icd-retry-${{ github.run_id }}
