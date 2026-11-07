@@ -186,12 +186,9 @@ repq("""      result = kbase_init_seqnos(queue);
       if (result != VK_SUCCESS)
          return result;""")
 
-repq("""   if (*active) {
-      *(volatile uint32_t *)subq->kbase.user_io.doorbell = 1;""",
-     """   fprintf(stderr, "pvbq: publish sq%u active=%u insert=%llu\\n", subqueue,
-           (unsigned)*active, (unsigned long long)subq->kbase.insert);
-   if (*active) {
-      *(volatile uint32_t *)subq->kbase.user_io.doorbell = 1;""")
+# P0: no publish trace in kbase_subqueue_publish(). It fired on every submit
+# for every subqueue, so it was the only per-frame log from this script.
+# The emit/wait traces below stay: they only run during queue init.
 
 repq("""      VkResult res =
          kbase_subqueue_emit_job(queue, subqueue, subq->kbase.init_stream_addr,""",
