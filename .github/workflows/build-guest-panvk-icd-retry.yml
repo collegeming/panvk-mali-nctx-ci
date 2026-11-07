@@ -188,6 +188,8 @@ jobs:
           JSON
           sha256sum out/libvulkan_manet.so | tee out/SHA256SUMS
           grep -ac 'stale control page' out/libvulkan_manet.so || true
+          # Fail closed: the release ICD must not carry the per-frame publish trace.
+          grep -aq "pvbq:" out/libvulkan_manet.so && exit 1
       - uses: actions/upload-artifact@v4
         with:
           name: panvk-icd-retry-${{ github.run_id }}
