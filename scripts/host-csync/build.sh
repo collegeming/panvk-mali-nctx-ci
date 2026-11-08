@@ -22,6 +22,17 @@ OUT=$ROOT/out
 mkdir -p "$WORK" "$OUT"
 cd "$WORK"
 
+# github.com/<repo>/archive/... answers through a redirect that intermittently
+# returns HTTP 504 on the hosted runners; codeload serves the same tarball.
+fetch_tar() {  # <primary url> <fallback url> <output file>
+  rm -f "$3"
+  if ! curl -fsSL --retry 8 --retry-delay 5 --retry-all-errors -o "$3" "$1"; then
+    rm -f "$3"
+    curl -fsSL --retry 8 --retry-delay 5 --retry-all-errors -o "$3" "$2"
+  fi
+  test -s "$3"
+}
+
 NDK_ZIP=android-ndk-r27c-linux.zip
 if [ ! -f "$NDK_ZIP" ]; then
   curl -fsSL --retry 3 -o "$NDK_ZIP" https://dl.google.com/android/repository/android-ndk-r27c-linux.zip
@@ -35,7 +46,8 @@ AR=$TOOL/bin/llvm-ar
 SYS=$TOOL/sysroot
 API=33
 
-curl -fsSL --retry 3 -o virgl.tgz https://github.com/MollySophia/virglrenderer/archive/e58441fc6fa6ce73e6545882b43c8c807fe22a11.tar.gz
+fetch_tar https://github.com/MollySophia/virglrenderer/archive/e58441fc6fa6ce73e6545882b43c8c807fe22a11.tar.gz \
+  https://codeload.github.com/MollySophia/virglrenderer/tar.gz/e58441fc6fa6ce73e6545882b43c8c807fe22a11 virgl.tgz
 tar xzf virgl.tgz
 V=$WORK/virglrenderer-e58441fc6fa6ce73e6545882b43c8c807fe22a11
 test -f "$V/src/drm/mali_kbase_renderer.c"
@@ -43,7 +55,8 @@ python3 "$HELPERS/patch_host_probe.py" "$V"
 python3 "$HERE/apply_csync.py" "$V"
 
 
-curl -fsSL --retry 3 -o epoxy.tgz https://github.com/anholt/libepoxy/archive/refs/tags/1.5.10.tar.gz
+fetch_tar https://github.com/anholt/libepoxy/archive/refs/tags/1.5.10.tar.gz \
+  https://codeload.github.com/anholt/libepoxy/tar.gz/refs/tags/1.5.10 epoxy.tgz
 tar xzf epoxy.tgz
 E=$WORK/libepoxy-1.5.10
 
