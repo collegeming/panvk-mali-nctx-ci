@@ -294,6 +294,13 @@ jobs:
           replace(p, old, new)
           PY
           git -C mesa diff --check
+      - name: Batch per-BO MEM_SYNC ranges in the virtio flush path (B0)
+        run: |
+          set -eux
+          python3 scripts/panvk-b0-sync-merge.py mesa
+          git -C mesa diff --check
+          git -C mesa diff --stat
+          git -C mesa diff -- src/panfrost/lib/kmod/kbase_kmod.c
       - name: Build PanVK with kbase virtio kmod
         run: |
           set -eux
@@ -324,7 +331,13 @@ jobs:
           JSON
           sha256sum out/libvulkan_manet.so | tee out/SHA256SUMS
           grep -ac 'stale control page' out/libvulkan_manet.so || true
+          # The device-side G probe needs the raw offset of the
+          # kbase_subqueue_wait_seqno copy the arch actually runs (six copies
+          # exist, perf probe by name is ambiguous), so publish the table.
+          readelf -sW out/libvulkan_manet.so > out/symbols.raw || true
+          grep -E 'kbase_subqueue_wait_seqno|kbv_bo_sync|kbv_queue_kick' \
+            out/symbols.raw | tee out/SYMBOLS.txt || true
       - uses: actions/upload-artifact@v4
         with:
-          name: panvk-icd-retry-${{ github.run_id }}
+          name: panvk-icd-b0-${{ github.run_id }}
           path: out/
