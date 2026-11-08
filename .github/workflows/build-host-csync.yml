@@ -1,0 +1,122 @@
+name: build-host-csync
+
+# E1 candidate: the PanVK host libvirglrenderer.so (Mali kbase native-context
+# backend) with the env-gated host CSYNC experiment.
+#
+# Base: collegeming/panvk-mali-nctx-ci @ cd5d307e, i.e. the exact scripts that
+# produced the deployed library
+#   sha256 22e1c7df223edcd10b374f419ff50149fa24e846ae7bfc5be18c66634db7c51c
+# The build script is that commit's scripts/host-ndk/build-host-ndk.sh with one
+# added step (apply_csync.py). Compiler flags, source list and link line are
+# unchanged, so the only binary difference is the experiment code.
+#
+# The gates are runtime-only and default to off:
+#   PANVK_HOST_CSYNC_SKIP_SHADOW=1  skip the shadow-BO CSYNC shared_sync(START)
+#   PANVK_HOST_KICK_SYNC_OFF=1      skip the kick shared_sync(END)
+#   PANVK_HOST_CSYNC_DIAG=1         aggregate counters on stderr
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [perf/host-csync-skip]
+    paths:
+      - '.github/workflows/build-host-csync.yml'
+      - 'scripts/host-csync/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: host-csync-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout CI scripts
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Record and pin the host-ndk inputs
+        run: |
+          set -eux
+          echo "workflow commit: $GITHUB_SHA"
+          sha256sum scripts/host-ndk/* scripts/host-csync/*
+          # Same helper sources that built the deployed library.
+          test "$(sha256sum scripts/host-ndk/build-host-ndk.sh | cut -d' ' -f1)" = \
+            "da8705a9192aaa5799fe2e3a31b29f65a4ecce38246ca9adce5d07718816a706"
+          test "$(sha256sum scripts/host-ndk/patch_host_probe.py | cut -d' ' -f1)" = \
+            "cdac26a26a1e1cc435717ec9c30b8a6309f9e4c695b9761fd472e704b93fae65"
+
+      - name: Install build tools
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y meson ninja-build pkg-config
+
+      - name: Build libvirglrenderer with the host CSYNC experiment
+        run: bash scripts/host-csync/build.sh
+
+      - name: Verify ELF, link contract and exported API
+        run: |
+          set -eux
+          f=out/libvirglrenderer.so
+          test -s "$f"
+          readelf -h "$f" | grep -q 'Machine:.*AArch64'
+          readelf -h "$f" | grep -q 'Class:.*ELF64'
+          readelf -d "$f" | grep -q 'SONAME.*\[libvirglrenderer.so\]'
+          readelf -d "$f" | grep NEEDED | sort > out/needed.txt
+          cat out/needed.txt
+          test "$(wc -l < out/needed.txt)" -eq 7
+          for need in libEGL.so libGLESv2.so liblog.so libdl.so libm.so libz.so libc.so; do
+            grep -q "NEEDED.*\[$need\]" out/needed.txt
+          done
+          # Every API symbol the deployed library exports must still be present.
+          readelf --dyn-syms --wide "$f" \
+            | awk '$7 != "UND" && $4 == "FUNC" { sub(/@.*/, "", $8); print $8 }' \
+            | sort -u > out/dynsym-func.txt
+          test "$(wc -l < out/dynsym-func.txt)" -gt 4200
+          for sym in \
+            mali_kbase_renderer_create mali_kbase_renderer_probe \
+            virgl_renderer_init virgl_renderer_cleanup virgl_renderer_poll \
+            virgl_renderer_submit_cmd virgl_renderer_execute \
+            virgl_renderer_context_create virgl_renderer_context_create_with_flags \
+            virgl_renderer_context_create_fence virgl_renderer_context_destroy \
+            virgl_renderer_context_poll virgl_renderer_context_get_poll_fd \
+            virgl_renderer_get_poll_fd virgl_renderer_get_cap_set \
+            virgl_renderer_fill_caps virgl_renderer_resource_create \
+            virgl_renderer_resource_create_blob virgl_renderer_resource_import_blob \
+            virgl_renderer_resource_export_blob virgl_renderer_resource_unref \
+            virgl_renderer_resource_map virgl_renderer_resource_unmap \
+            virgl_renderer_resource_get_info virgl_renderer_resource_get_info_ext \
+            virgl_renderer_resource_get_map_info virgl_renderer_resource_get_map_ptr \
+            virgl_renderer_resource_get_priv virgl_renderer_resource_set_priv \
+            virgl_renderer_resource_attach_iov virgl_renderer_resource_detach_iov \
+            virgl_renderer_transfer_read_iov virgl_renderer_transfer_write_iov \
+            virgl_renderer_create_fence virgl_renderer_export_fence \
+            virgl_renderer_ctx_attach_resource virgl_renderer_ctx_detach_resource \
+            virgl_renderer_force_ctx_0 virgl_renderer_get_rect \
+            virgl_renderer_get_cursor_data virgl_renderer_reset \
+            virgl_renderer_get_fd_for_texture virgl_renderer_get_fd_for_texture2 \
+            virgl_renderer_resource_export_display_blob \
+            virgl_renderer_resource_import_eglimage \
+            virgl_renderer_resource_set_guest_blob_fd; do
+            grep -qx "$sym" out/dynsym-func.txt
+          done
+          # The three runtime gates and the diag record are compiled in.
+          for marker in PANVK_HOST_CSYNC_SKIP_SHADOW PANVK_HOST_KICK_SYNC_OFF \
+                        PANVK_HOST_CSYNC_DIAG 'panvk-host-csync: fd=%d why=%s'; do
+            grep -aqF -- "$marker" "$f"
+          done
+          ls -l "$f" out/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: virglrenderer-host-csync-${{ github.run_id }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 30
