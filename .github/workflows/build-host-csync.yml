@@ -74,38 +74,11 @@ jobs:
           for need in libEGL.so libGLESv2.so liblog.so libdl.so libm.so libz.so libc.so; do
             grep -q "NEEDED.*\[$need\]" out/needed.txt
           done
-          # Every API symbol the deployed library exports must still be present.
-          readelf --dyn-syms --wide "$f" \
-            | awk '$7 != "UND" && $4 == "FUNC" { sub(/@.*/, "", $8); print $8 }' \
-            | sort -u > out/dynsym-func.txt
-          test "$(wc -l < out/dynsym-func.txt)" -gt 4200
-          for sym in \
-            mali_kbase_renderer_create mali_kbase_renderer_probe \
-            virgl_renderer_init virgl_renderer_cleanup virgl_renderer_poll \
-            virgl_renderer_submit_cmd virgl_renderer_execute \
-            virgl_renderer_context_create virgl_renderer_context_create_with_flags \
-            virgl_renderer_context_create_fence virgl_renderer_context_destroy \
-            virgl_renderer_context_poll virgl_renderer_context_get_poll_fd \
-            virgl_renderer_get_poll_fd virgl_renderer_get_cap_set \
-            virgl_renderer_fill_caps virgl_renderer_resource_create \
-            virgl_renderer_resource_create_blob virgl_renderer_resource_import_blob \
-            virgl_renderer_resource_export_blob virgl_renderer_resource_unref \
-            virgl_renderer_resource_map virgl_renderer_resource_unmap \
-            virgl_renderer_resource_get_info virgl_renderer_resource_get_info_ext \
-            virgl_renderer_resource_get_map_info virgl_renderer_resource_get_map_ptr \
-            virgl_renderer_resource_get_priv virgl_renderer_resource_set_priv \
-            virgl_renderer_resource_attach_iov virgl_renderer_resource_detach_iov \
-            virgl_renderer_transfer_read_iov virgl_renderer_transfer_write_iov \
-            virgl_renderer_create_fence virgl_renderer_export_fence \
-            virgl_renderer_ctx_attach_resource virgl_renderer_ctx_detach_resource \
-            virgl_renderer_force_ctx_0 virgl_renderer_get_rect \
-            virgl_renderer_get_cursor_data virgl_renderer_reset \
-            virgl_renderer_get_fd_for_texture virgl_renderer_get_fd_for_texture2 \
-            virgl_renderer_resource_export_display_blob \
-            virgl_renderer_resource_import_eglimage \
-            virgl_renderer_resource_set_guest_blob_fd; do
-            grep -qx "$sym" out/dynsym-func.txt
-          done
+          # The exported dynamic symbol set must be identical to the deployed
+          # library (baseline-dynsym.txt, 4297 names). The experiment adds only
+          # static functions, so any delta means the ABI changed.
+          python3 scripts/host-csync/dynsym_defined.py "$f" > out/dynsym.txt
+          diff -u scripts/host-csync/baseline-dynsym.txt out/dynsym.txt
           # The three runtime gates and the diag record are compiled in.
           for marker in PANVK_HOST_CSYNC_SKIP_SHADOW PANVK_HOST_KICK_SYNC_OFF \
                         PANVK_HOST_CSYNC_DIAG 'panvk-host-csync: fd=%d why=%s'; do
