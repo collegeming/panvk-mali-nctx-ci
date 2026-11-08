@@ -188,8 +188,8 @@ done
 
 # Ship the exact patched sources next to the binary for review and rebuilds.
 cp "$V/src/drm/mali_kbase_renderer.c" "$V/src/drm/kbase_transport_queue.h" "$OUT/"
-sha256sum "$OUT/libvirglrenderer.so" > "$OUT/SHA256SUMS"
-(cd "$OUT" && sha256sum mali_kbase_renderer.c kbase_transport_queue.h >> SHA256SUMS)
+(cd "$OUT" && sha256sum libvirglrenderer.so mali_kbase_renderer.c \
+  kbase_transport_queue.h > SHA256SUMS && cat SHA256SUMS)
 {
   echo "base CI commit: cd5d307ec59c781819bae175d3e79fa510c3193b (scripts/host-ndk unchanged)"
   echo "workflow commit: ${GITHUB_SHA:-unknown}"
