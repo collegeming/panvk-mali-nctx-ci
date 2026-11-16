@@ -105,7 +105,13 @@ jobs:
           lunch aosp_arm64 trunk_staging eng
           free -h
           df -h /
-          ALLOW_MISSING_DEPENDENCIES=true SOONG_ALLOW_MISSING_DEPENDENCIES=true TARGET_BUILD_UNBUNDLED=true m libvirglrenderer -j1
+          # The shared library links and strips before the com.android.virt
+          # apex step, which needs the minimal manifest's missing crosvm
+          # bootloader.  Keep the successfully built .so and let Collect pick
+          # it; fail only if no shared library was produced at all.
+          ALLOW_MISSING_DEPENDENCIES=true SOONG_ALLOW_MISSING_DEPENDENCIES=true TARGET_BUILD_UNBUNDLED=true m libvirglrenderer -j1 || true
+          find out -type f -name 'libvirglrenderer.so' -print
+          test -n "$(find out -type f -name 'libvirglrenderer.so' -print -quit)"
           free -h
           df -h /
       - name: Collect artifact
