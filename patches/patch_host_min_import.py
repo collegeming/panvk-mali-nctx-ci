@@ -40,7 +40,9 @@ REGISTRY = r'''
  * sealed memfd that backs a cmd5/cmd11 shared allocation.  KB_IMPORT_SHARED
  * duplicates it into the consumer's kbase context and returns the mmap VA
  * that this context's native commands must use.  Entries live until process
- * exit in this bring-up variant. */
+ * exit in this bring-up variant.  cmd4 deliberately does not reclaim them:
+ * a consumer may import after the producer frees, and a second consumer may
+ * still need the producer's entry. */
 #define MAX_SHARED 1024
 struct kb_shared_entry {
    uint32_t handle, size;
@@ -79,14 +81,14 @@ kb_shared_register(uint32_t handle, uint32_t size, int memfd)
 }
 
 /* Returns a CLOEXEC dup of the producer's memfd, or a negative errno.
- * A per-context handle numbering can alias two different blobs across
- * contexts, so prefer an exact size match and only then fall back to the
- * first entry with the same numeric handle. */
+ * Handles can alias across contexts if an older producer used per-context
+ * numbering, so require both the numeric handle and the exact size.  Never
+ * fall back to a same-handle entry with another size: importing the wrong
+ * allocation is worse than failing the import. */
 static int
 kb_shared_dup(uint32_t handle, uint32_t want_size, uint32_t *size)
 {
    int fd = -ENOENT;
-   int fallback = -1;
 
    pthread_mutex_lock(&kb_shared_lock);
    for (unsigned i = 0; i < MAX_SHARED; i++) {
@@ -96,11 +98,8 @@ kb_shared_dup(uint32_t handle, uint32_t want_size, uint32_t *size)
                           "dup: id=%u want=%u cand[%u] reg=%u",
                           (unsigned)handle, (unsigned)want_size, i,
                           (unsigned)kb_shared[i].size);
-      if (want_size && kb_shared[i].size != want_size) {
-         if (fallback < 0)
-            fallback = (int)i;
+      if (kb_shared[i].size != want_size)
          continue;
-      }
       fd = fcntl(kb_shared[i].memfd, F_DUPFD_CLOEXEC, 3);
       if (fd >= 0 && size)
          *size = kb_shared[i].size;
@@ -111,20 +110,9 @@ kb_shared_dup(uint32_t handle, uint32_t want_size, uint32_t *size)
                           (unsigned)handle, (unsigned)kb_shared[i].size, fd);
       break;
    }
-   if (fd < 0 && fallback >= 0) {
-      fd = fcntl(kb_shared[fallback].memfd, F_DUPFD_CLOEXEC, 3);
-      if (fd >= 0 && size)
-         *size = kb_shared[fallback].size;
-      else if (fd < 0)
-         fd = -errno;
+   if (fd == -ENOENT)
       __android_log_print(ANDROID_LOG_ERROR, "kbimport",
-                          "dup: id=%u want=%u fallback reg=%u fd=%d",
-                          (unsigned)handle, (unsigned)want_size,
-                          (unsigned)kb_shared[fallback].size, fd);
-   }
-   if (fd < 0 && fallback < 0)
-      __android_log_print(ANDROID_LOG_ERROR, "kbimport",
-                          "dup: id=%u want=%u not found",
+                          "dup: id=%u want=%u exact not found",
                           (unsigned)handle, (unsigned)want_size);
    pthread_mutex_unlock(&kb_shared_lock);
    return fd;
@@ -349,6 +337,82 @@ def main() -> int:
         "      c->allocated += q->size;\n"
         "      r->handle = c->bo[slot].handle; r->size = q->size;\n",
         "regular alloc global handle")
+
+    text = sub_idem(
+        text,
+        "   struct kb_bo *bo = NULL;\n"
+        "   for (unsigned i = 0; i < MAX_BO; i++)\n"
+        "      if (c->bo[i].ptr && c->bo[i].handle == q->handle) { bo = &c->bo[i]; break; }\n"
+        "   if (!bo) { r->status = -ENOENT; return 0; }\n",
+        "   struct kb_bo *bo = NULL, *imported = NULL;\n"
+        "   /* If a same-context producer and consumer import share one handle,\n"
+        "    * target the imported copy so cmd 4 retires the consumer reference\n"
+        "    * instead of releasing the producer. */\n"
+        "   for (unsigned i = 0; i < MAX_BO; i++) {\n"
+        "      if (!c->bo[i].ptr || c->bo[i].handle != q->handle)\n"
+        "         continue;\n"
+        "      if (!bo)\n"
+        "         bo = &c->bo[i];\n"
+        "      if (c->bo[i].imported) {\n"
+        "         imported = &c->bo[i];\n"
+        "         break;\n"
+        "      }\n"
+        "   }\n"
+        "   if (imported)\n"
+        "      bo = imported;\n"
+        "   if (!bo) { r->status = -ENOENT; return 0; }\n",
+        "prefer imported on handle lookup")
+
+    text = sub_idem(
+        text,
+        "      for (unsigned i = 0; i < MAX_BO; i++) {\n"
+        "         struct kb_bo *bo = &c->bo[i];\n"
+        "         if (!bo->ptr || !bo->shared || bo->handle != id) continue;\n"
+        "         if (bo->exported || size != bo->size || flags != VIRGL_RENDERER_BLOB_FLAG_USE_MAPPABLE)\n"
+        "            return -EINVAL;\n"
+        "         int fd = fcntl(bo->memfd, F_DUPFD_CLOEXEC, 3);\n"
+        "         if (fd < 0) return -errno;\n"
+        "         out->type = VIRGL_RESOURCE_FD_SHM; out->u.fd = fd;\n"
+        "         out->map_info = VIRGL_RENDERER_MAP_CACHE_CACHED;\n"
+        "         bo->exported = true; return 0;\n"
+        "      }\n"
+        "      return -ENOENT;\n",
+        "      struct kb_bo *bo = NULL;\n"
+        "      for (unsigned i = 0; i < MAX_BO; i++) {\n"
+        "         struct kb_bo *candidate = &c->bo[i];\n"
+        "         if (!candidate->ptr || !candidate->shared ||\n"
+        "             candidate->handle != id)\n"
+        "            continue;\n"
+        "         if (!bo || (candidate->imported && !bo->imported))\n"
+        "            bo = candidate;\n"
+        "         if (bo->imported)\n"
+        "            break;\n"
+        "      }\n"
+        "      if (!bo)\n"
+        "         return -ENOENT;\n"
+        "      if (bo->exported || size != bo->size ||\n"
+        "          flags != VIRGL_RENDERER_BLOB_FLAG_USE_MAPPABLE)\n"
+        "         return -EINVAL;\n"
+        "      int fd = fcntl(bo->memfd, F_DUPFD_CLOEXEC, 3);\n"
+        "      if (fd < 0) return -errno;\n"
+        "      out->type = VIRGL_RESOURCE_FD_SHM; out->u.fd = fd;\n"
+        "      out->map_info = VIRGL_RENDERER_MAP_CACHE_CACHED;\n"
+        "      bo->exported = true; return 0;\n",
+        "blob prefer imported")
+
+    text = sub_idem(
+        text,
+        "   if (hdr->cmd == 4) {\n"
+        "      c->allocated -= bo->size; free_bo(base->fd, bo); return 0;\n"
+        "   }\n",
+        "   if (hdr->cmd == 4) {\n"
+        "      /* Do not unregister the registry entry here.  A consumer may\n"
+        "       * import after this context frees its reference, and a second\n"
+        "       * consumer may still need the producer; reclamation needs an\n"
+        "       * owner/refcount or a KMD resource-destroy notification. */\n"
+        "      c->allocated -= bo->size; free_bo(base->fd, bo); return 0;\n"
+        "   }\n",
+        "cmd4 registry retention")
 
     # 32-bit ARM variant: uintptr_t >> 32 is rejected by -Werror.
     text = sub_idem(
