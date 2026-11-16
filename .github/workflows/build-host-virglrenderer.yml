@@ -100,7 +100,7 @@ jobs:
           lunch aosp_arm64 trunk_staging eng
           free -h
           df -h /
-          ALLOW_MISSING_DEPENDENCIES=true TARGET_BUILD_UNBUNDLED=true m libvirglrenderer -j1
+          ALLOW_MISSING_DEPENDENCIES=true SOONG_ALLOW_MISSING_DEPENDENCIES=true TARGET_BUILD_UNBUNDLED=true m libvirglrenderer -j1
           free -h
           df -h /
       - name: Collect artifact
