@@ -45,6 +45,13 @@ grep -q 'ATTACH-DIAG: create_blob' "$V/src/virglrenderer.c"
 echo '--- ComponentError grep (virglrenderer tree) ---'
 grep -rn 'ComponentError' "$V/src" || echo 'ComponentError: not present in virglrenderer'
 
+# Minimal idempotent attach candidate: a second attach for a typed resource
+# keeps the first (complete) backing and returns success.  Applied after the
+# log patch so the noop path is visible in the same ATTACH-DIAG stream.
+test -f "$REPO/patches/patch_host_attach_noop.py"
+python3 "$REPO/patches/patch_host_attach_noop.py" "$V"
+grep -q 'ATTACH-DIAG: noop' "$V/src/virgl_resource.c"
+
 
 curl -fsSL --retry 3 -o epoxy.tgz https://github.com/anholt/libepoxy/archive/refs/tags/1.5.10.tar.gz
 tar xzf epoxy.tgz
