@@ -200,7 +200,7 @@ shared_import_fd(struct kb_ctx *c, struct kb_bo *bo, uint32_t size,
                  int src_fd, bool imported)
 {
    int ret, memfd = -1, dma = -1, dev = -1;
-   bool have_import = false, mem_same_va = false;
+   bool have_import = false;
    void *cpu = MAP_FAILED, *gpu = MAP_FAILED;
 
    memfd = fcntl(src_fd, F_DUPFD_CLOEXEC, 3);
@@ -229,7 +229,6 @@ shared_import_fd(struct kb_ctx *c, struct kb_bo *bo, uint32_t size,
    if (ret)
       goto fail;
    have_import = true;
-   mem_same_va = !!(imp.out.flags & BASE_MEM_SAME_VA);
    if (!(imp.out.flags & (BASE_MEM_SAME_VA | BASE_MEM_NEED_MMAP)) ||
        imp.out.va_pages != size / 4096) {
       errno = ENOTSUP;
@@ -245,10 +244,11 @@ shared_import_fd(struct kb_ctx *c, struct kb_bo *bo, uint32_t size,
    struct dma_buf_sync sync = {.flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_RW};
    if (ioctl(dma, DMA_BUF_IOCTL_SYNC, &sync))
       goto fail;
+   /* Match the original producer path exactly: native submits use the host
+    * mmap address, regardless of whether kbase also reports SAME_VA. */
    *bo = (struct kb_bo){.ptr = cpu, .gpu_mapping = gpu, .size = size,
                         .memfd = memfd, .dmabuf = dma, .shared = true,
-                        .same_va = mem_same_va,
-                        .gpu_va = mem_same_va ? (uintptr_t)gpu : imp.out.gpu_va,
+                        .same_va = true, .gpu_va = (uintptr_t)gpu,
                         .imported = imported};
    return 0;
 
@@ -258,7 +258,7 @@ fail:
       munmap(gpu, size);
    if (cpu != MAP_FAILED)
       munmap(cpu, size);
-   if (have_import && (!mem_same_va || gpu == MAP_FAILED)) {
+   if (have_import && gpu == MAP_FAILED) {
       struct kbase_ioctl_mem_free f = {.gpu_addr = imp.out.gpu_va};
       ioctl(c->base.fd, KBASE_IOCTL_MEM_FREE, &f);
    }
@@ -392,7 +392,7 @@ def main() -> int:
         "      munmap(bo->gpu_mapping, bo->size);\n"
         "      if (bo->dmabuf >= 0) close(bo->dmabuf);\n"
         "      close(bo->memfd);\n"
-        "      if (!bo->same_va) {\n"
+        "      if (bo->shadow && !bo->same_va) {\n"
         "         struct kbase_ioctl_mem_free f = {.gpu_addr = bo->gpu_va};\n"
         "         ioctl(fd, KBASE_IOCTL_MEM_FREE, &f);\n"
         "      }\n"
