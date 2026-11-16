@@ -2,7 +2,7 @@ name: build-host-virglrenderer-ndk
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, feat/kbase-shared-import]
     paths:
       - '.github/workflows/build-host-virglrenderer-ndk.yml'
       - 'patches/patch_host_kbase_import.py'
