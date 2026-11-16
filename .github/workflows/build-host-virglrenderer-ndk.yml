@@ -6,6 +6,7 @@ on:
     paths:
       - '.github/workflows/build-host-virglrenderer-ndk.yml'
       - 'patches/patch_host_kbase_import.py'
+      - 'patches/patch_host_min_import.py'
       - 'scripts/host-ndk/**'
 permissions:
   contents: read
