@@ -435,6 +435,16 @@ def main() -> int:
         "   }\n",
         "KB_INFO capability")
 
+    # The upstream 4 GiB-boundary check shifts uintptr_t by 32 bits.  Soong
+    # also builds a 32-bit ARM variant, where that shift is undefined and
+    # -Werror rejects it.  Widen before shifting; on 32-bit both halves are 0.
+    text = sub_idem(
+        text,
+        "         if (((uintptr_t)ptr >> 32) == (((uintptr_t)ptr + total - 1) >> 32)) {\n",
+        "         if (((uint64_t)(uintptr_t)ptr >> 32) ==\n"
+        "             (((uint64_t)(uintptr_t)ptr + total - 1) >> 32)) {\n",
+        "32-bit alias address check")
+
     text = sub_idem(
         text,
         "   if (hdr->cmd == 1 || hdr->cmd == 5 || hdr->cmd == 11) {\n",
