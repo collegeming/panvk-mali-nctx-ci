@@ -2,9 +2,10 @@ name: build-host-virglrenderer
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, feat/kbase-shared-import]
     paths:
       - '.github/workflows/build-host-virglrenderer.yml'
+      - 'patches/patch_host_kbase_import.py'
 permissions:
   contents: read
 concurrency:
@@ -52,6 +53,12 @@ jobs:
           grep -q 'mali_kbase_renderer.c' aosp/external/virglrenderer/Android.bp
           grep -q 'mali_kbase' aosp/external/virglrenderer/src/drm/drm_renderer.c
           grep -q 'ENABLE_DRM2KGSL 1' aosp/external/virglrenderer/prebuilt-intermediates/config.h
+      - name: Apply cross-context shared blob import patch
+        run: |
+          set -eux
+          python3 patches/patch_host_kbase_import.py aosp/external/virglrenderer
+          grep -q 'KB_IMPORT_SHARED' aosp/external/virglrenderer/src/drm/mali_kbase_renderer.c
+          grep -q 'kb_shared_register' aosp/external/virglrenderer/src/drm/mali_kbase_renderer.c
       - name: Trim Venus sources and the unneeded host variant
         run: |
           set -eux
