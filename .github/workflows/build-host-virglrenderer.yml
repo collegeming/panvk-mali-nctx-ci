@@ -50,6 +50,11 @@ jobs:
           cd "$GITHUB_WORKSPACE/aosp"
           repo init -u https://github.com/Droid-VM/crosvm-minimal-manifest -b droidvm -m crosvm-minimal.xml --depth 1
           repo sync -c -j8 --no-tags --optimized-fetch --force-sync
+          if [ ! -d external/llvm-libc ]; then
+            git clone --depth 1 -b android16-qpr2-release \
+              https://android.googlesource.com/platform/external/llvm-libc \
+              external/llvm-libc
+          fi
           df -h /
       - name: Install experimental Mali-kbase virglrenderer snapshot
         run: |
