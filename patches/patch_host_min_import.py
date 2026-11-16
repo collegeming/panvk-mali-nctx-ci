@@ -31,9 +31,7 @@ def require(condition: bool, message: str) -> None:
 
 
 def sub_idem(text: str, old: str, new: str, what: str) -> str:
-    if new in text:
-        return text
-    require(old in text, f"missing anchor: {what}")
+    require(text.count(old) == 1, f"anchor not unique: {what}")
     return text.replace(old, new, 1)
 
 
@@ -51,6 +49,13 @@ struct kb_shared_entry {
 };
 static struct kb_shared_entry kb_shared[MAX_SHARED];
 static pthread_mutex_t kb_shared_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint32_t kb_next_handle;
+
+static uint32_t
+kb_alloc_handle(void)
+{
+   return __atomic_add_fetch(&kb_next_handle, 1, __ATOMIC_RELAXED);
+}
 
 static int
 kb_shared_register(uint32_t handle, uint32_t size, int memfd)
@@ -73,23 +78,54 @@ kb_shared_register(uint32_t handle, uint32_t size, int memfd)
    return -ENOSPC;
 }
 
-/* Returns a CLOEXEC dup of the producer's memfd, or a negative errno. */
+/* Returns a CLOEXEC dup of the producer's memfd, or a negative errno.
+ * A per-context handle numbering can alias two different blobs across
+ * contexts, so prefer an exact size match and only then fall back to the
+ * first entry with the same numeric handle. */
 static int
-kb_shared_dup(uint32_t handle, uint32_t *size)
+kb_shared_dup(uint32_t handle, uint32_t want_size, uint32_t *size)
 {
    int fd = -ENOENT;
+   int fallback = -1;
 
    pthread_mutex_lock(&kb_shared_lock);
    for (unsigned i = 0; i < MAX_SHARED; i++) {
       if (!kb_shared[i].used || kb_shared[i].handle != handle)
          continue;
+      __android_log_print(ANDROID_LOG_ERROR, "kbimport",
+                          "dup: id=%u want=%u cand[%u] reg=%u",
+                          (unsigned)handle, (unsigned)want_size, i,
+                          (unsigned)kb_shared[i].size);
+      if (want_size && kb_shared[i].size != want_size) {
+         if (fallback < 0)
+            fallback = (int)i;
+         continue;
+      }
       fd = fcntl(kb_shared[i].memfd, F_DUPFD_CLOEXEC, 3);
       if (fd >= 0 && size)
          *size = kb_shared[i].size;
       else if (fd < 0)
          fd = -errno;
+      __android_log_print(ANDROID_LOG_ERROR, "kbimport",
+                          "dup: id=%u exact reg=%u fd=%d",
+                          (unsigned)handle, (unsigned)kb_shared[i].size, fd);
       break;
    }
+   if (fd < 0 && fallback >= 0) {
+      fd = fcntl(kb_shared[fallback].memfd, F_DUPFD_CLOEXEC, 3);
+      if (fd >= 0 && size)
+         *size = kb_shared[fallback].size;
+      else if (fd < 0)
+         fd = -errno;
+      __android_log_print(ANDROID_LOG_ERROR, "kbimport",
+                          "dup: id=%u want=%u fallback reg=%u fd=%d",
+                          (unsigned)handle, (unsigned)want_size,
+                          (unsigned)kb_shared[fallback].size, fd);
+   }
+   if (fd < 0 && fallback < 0)
+      __android_log_print(ANDROID_LOG_ERROR, "kbimport",
+                          "dup: id=%u want=%u not found",
+                          (unsigned)handle, (unsigned)want_size);
    pthread_mutex_unlock(&kb_shared_lock);
    return fd;
 }
@@ -187,14 +223,20 @@ IMPORT_CMD = r'''   if (hdr->cmd == 16) {
       }
 
       uint32_t want = q->size, size = 0;
-      int fd = kb_shared_dup(q->handle, &size);
+      int fd = kb_shared_dup(q->handle, want, &size);
+      __android_log_print(ANDROID_LOG_ERROR, "kbimport",
+                          "cmd16: id=%u want=%u reg=%u alloc=%u fd=%d",
+                          (unsigned)q->handle, (unsigned)want,
+                          (unsigned)size, (unsigned)c->allocated, fd);
       if (fd < 0) {
          r->status = fd;
          return 0;
       }
-      fprintf(stderr, "KB_IMPORT_SHARED: id=%u want=%u reg=%u limit=%u alloc=%u\n",
-              q->handle, want, size, c->limit, c->allocated);
       if ((want && want != size) || !size || (size & 4095)) {
+         __android_log_print(ANDROID_LOG_ERROR, "kbimport",
+                             "cmd16: id=%u want=%u reg=%u reject",
+                             (unsigned)q->handle, (unsigned)want,
+                             (unsigned)size);
          close(fd);
          r->status = -EINVAL;
          return 0;
@@ -217,6 +259,10 @@ IMPORT_CMD = r'''   if (hdr->cmd == 16) {
       r->handle = q->handle;
       r->size = size;
       r->value = c->bo[slot].gpu_va;
+      __android_log_print(ANDROID_LOG_ERROR, "kbimport",
+                          "cmd16: id=%u size=%u va=0x%llx",
+                          (unsigned)q->handle, (unsigned)size,
+                          (unsigned long long)c->bo[slot].gpu_va);
       return 0;
    }
 '''
@@ -228,14 +274,17 @@ def main() -> int:
     path = pathlib.Path(sys.argv[1]) / "src/drm/mali_kbase_renderer.c"
     text = path.read_text()
 
-    if "KB_IMPORT_SHARED_MIN" in text:
+    if "KB_IMPORT_SHARED_MIN 2" in text:
         print("already patched")
         return 0
+    require("KB_IMPORT_SHARED_MIN" not in text,
+            "an older KB_IMPORT_SHARED_MIN patch is present; regenerate from upstream")
     require("KB_IMPORT_SHARED" not in text,
             "another KB_IMPORT_SHARED patch is present; regenerate from upstream")
 
     text = sub_idem(text, "#include <poll.h>\n",
-                    "#include <poll.h>\n#include <pthread.h>\n", "pthread include")
+                    "#include <poll.h>\n#include <pthread.h>\n#include <android/log.h>\n",
+                    "pthread/log includes")
 
     text = sub_idem(
         text,
@@ -244,8 +293,9 @@ def main() -> int:
         "kb_bo imported flag")
 
     marker = "static int shared_alloc(struct kb_ctx *c, struct kb_bo *bo, uint32_t size)"
+    require(text.count(marker) == 1, "anchor not unique: shared_alloc")
     pos = text.index(marker)
-    text = text[:pos] + REGISTRY + "\n#define KB_IMPORT_SHARED_MIN 1\n\n" + text[pos:]
+    text = text[:pos] + REGISTRY + "\n#define KB_IMPORT_SHARED_MIN 2\n\n" + text[pos:]
 
     text = sub_idem(
         text,
@@ -259,7 +309,7 @@ def main() -> int:
         "         c->bo[slot].handle = ++c->next_handle;\n"
         "         c->allocated += q->size;\n"
         "         r->handle = c->next_handle; r->size = q->size;\n",
-        "         c->bo[slot].handle = ++c->next_handle;\n"
+        "         c->bo[slot].handle = kb_alloc_handle();\n"
         "         c->allocated += q->size;\n"
         "         if (hdr->cmd == 5 || (hdr->cmd == 11 && q->reserved)) {\n"
         "            int reg_ret = kb_shared_register(c->bo[slot].handle,\n"
@@ -274,6 +324,31 @@ def main() -> int:
         "         }\n"
         "         r->handle = c->bo[slot].handle; r->size = q->size;\n",
         "register shared producer")
+
+    # The 64 MiB test budget was a bring-up guard.  It must not reject a
+    # legitimate shared import while C1 is being brought up.
+    text = sub_idem(
+        text,
+        "      if (!q->size || q->size > c->limit || (q->size & 4095) ||\n"
+        "          q->size > c->limit - c->allocated) { r->status = -EINVAL; return 0; }\n",
+        "      if (!q->size || (q->size & 4095)) { r->status = -EINVAL; return 0; }\n",
+        "remove alloc budget")
+
+    text = sub_idem(
+        text,
+        "      if (slot == c->bo_limit || c->next_handle == UINT32_MAX) { r->status = -ENOSPC; return 0; }\n",
+        "      if (slot == c->bo_limit) { r->status = -ENOSPC; return 0; }\n",
+        "global handle capacity")
+
+    text = sub_idem(
+        text,
+        "      c->bo[slot] = (struct kb_bo){.ptr = ptr, .size = q->size, .handle = ++c->next_handle};\n"
+        "      c->allocated += q->size;\n"
+        "      r->handle = c->next_handle; r->size = q->size;\n",
+        "      c->bo[slot] = (struct kb_bo){.ptr = ptr, .size = q->size, .handle = kb_alloc_handle()};\n"
+        "      c->allocated += q->size;\n"
+        "      r->handle = c->bo[slot].handle; r->size = q->size;\n",
+        "regular alloc global handle")
 
     # 32-bit ARM variant: uintptr_t >> 32 is rejected by -Werror.
     text = sub_idem(
