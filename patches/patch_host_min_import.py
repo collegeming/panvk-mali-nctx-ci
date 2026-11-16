@@ -192,9 +192,9 @@ IMPORT_CMD = r'''   if (hdr->cmd == 16) {
          r->status = fd;
          return 0;
       }
-      if ((want && want != size) || !size || (size & 4095) ||
-          size > c->limit || c->allocated > c->limit ||
-          size > c->limit - c->allocated) {
+      fprintf(stderr, "KB_IMPORT_SHARED: id=%u want=%u reg=%u limit=%u alloc=%u\n",
+              q->handle, want, size, c->limit, c->allocated);
+      if ((want && want != size) || !size || (size & 4095)) {
          close(fd);
          r->status = -EINVAL;
          return 0;
