@@ -14,7 +14,10 @@ adds:
   * a process-global registry keyed by the (now globally unique) blob handle;
   * KB_IMPORT_SHARED (ccmd 16), which imports the producer's sealed memfd into
     the calling context and returns that context's kbase GPU VA;
-  * import-aware lifetime (the origin unregisters, imported copies do not).
+  * import-aware lifetime (the origin unregisters, imported copies do not);
+  * pinning of exported registry entries so a consumer can still import after
+    the producer released its resource;
+  * KB_CAP_IMPORT_SHARED in KB_INFO so the guest can negotiate the new ccmd.
 
 The guest sends ccmd 16 from vdrm_wddm.c before it creates the reused WDDM
 allocation.  Keep the two sides in lockstep.
@@ -24,6 +27,9 @@ from __future__ import annotations
 
 import pathlib
 import sys
+
+PATCH_VERSION = 2
+VERSION_MARKER = f"KB_IMPORT_SHARED_PATCH_VERSION {PATCH_VERSION}"
 
 
 def fail(message: str) -> "NoReturn":
@@ -36,6 +42,7 @@ def require(condition: bool, message: str) -> None:
 
 
 def find_function(text: str, signature: str) -> tuple[int, int]:
+    require(text.count(signature) == 1, f"anchor not unique: {signature}")
     start = text.index(signature)
     brace = text.index("{", start)
     depth = 0
@@ -55,9 +62,7 @@ def replace_function(text: str, signature: str, replacement: str) -> str:
 
 
 def sub_idem(text: str, old: str, new: str, what: str) -> str:
-    if new in text:
-        return text
-    require(old in text, f"missing anchor: {what}")
+    require(text.count(old) == 1, f"anchor not unique: {what}")
     return text.replace(old, new, 1)
 
 
@@ -71,35 +76,50 @@ REGISTRY = r'''
  * context and hand back a GPU VA valid for that context's native submits.
  * Handles are allocated from one global counter: the id is part of the KMD's
  * blob metadata, so per-context counters could alias unrelated resources.
+ *
+ * A producer entry is pinned the first time its blob is exported.  Pinned
+ * entries survive the producer context so a consumer can still import after
+ * the producer released its resource; they are reclaimed at process exit.
+ * Unpinned entries are owned by the context that created them and are removed
+ * by free_bo()/destroy().
  */
 #define MAX_SHARED 1024
+#define KB_CAP_IMPORT_SHARED (1u << 0)
+#define KB_IMPORT_SHARED_PATCH_VERSION 2
 struct kb_shared_entry {
    uint32_t handle, size;
    int memfd;
+   struct kb_ctx *owner;
+   bool used, pinned;
 };
 static struct kb_shared_entry kb_shared[MAX_SHARED];
 static pthread_mutex_t kb_shared_lock = PTHREAD_MUTEX_INITIALIZER;
-static uint32_t kb_next_handle;
+static uint64_t kb_next_handle;
 
 static uint32_t
 kb_alloc_handle(void)
 {
-   return __atomic_add_fetch(&kb_next_handle, 1, __ATOMIC_RELAXED);
+   uint64_t h = __atomic_add_fetch(&kb_next_handle, 1, __ATOMIC_RELAXED);
+   if (h == 0 || h > UINT32_MAX)
+      return 0;
+   return (uint32_t)h;
 }
 
 static int
-kb_shared_register(uint32_t handle, uint32_t size, int memfd)
+kb_shared_register(struct kb_ctx *owner, uint32_t handle, uint32_t size,
+                   int memfd)
 {
-   int fd = dup(memfd);
+   int fd = fcntl(memfd, F_DUPFD_CLOEXEC, 3);
    if (fd < 0)
       return -errno;
 
    pthread_mutex_lock(&kb_shared_lock);
    for (unsigned i = 0; i < MAX_SHARED; i++) {
-      if (kb_shared[i].memfd)
+      if (kb_shared[i].used)
          continue;
       kb_shared[i] = (struct kb_shared_entry){
-         .handle = handle, .size = size, .memfd = fd};
+         .handle = handle, .size = size, .memfd = fd,
+         .owner = owner, .used = true, .pinned = false};
       pthread_mutex_unlock(&kb_shared_lock);
       return 0;
    }
@@ -113,11 +133,40 @@ kb_shared_unregister(uint32_t handle)
 {
    pthread_mutex_lock(&kb_shared_lock);
    for (unsigned i = 0; i < MAX_SHARED; i++) {
-      if (kb_shared[i].memfd && kb_shared[i].handle == handle) {
-         close(kb_shared[i].memfd);
-         memset(&kb_shared[i], 0, sizeof(kb_shared[i]));
-         break;
-      }
+      if (!kb_shared[i].used || kb_shared[i].pinned ||
+          kb_shared[i].handle != handle)
+         continue;
+      close(kb_shared[i].memfd);
+      memset(&kb_shared[i], 0, sizeof(kb_shared[i]));
+      break;
+   }
+   pthread_mutex_unlock(&kb_shared_lock);
+}
+
+static void
+kb_shared_unregister_owner(struct kb_ctx *owner)
+{
+   pthread_mutex_lock(&kb_shared_lock);
+   for (unsigned i = 0; i < MAX_SHARED; i++) {
+      if (!kb_shared[i].used || kb_shared[i].pinned ||
+          kb_shared[i].owner != owner)
+         continue;
+      close(kb_shared[i].memfd);
+      memset(&kb_shared[i], 0, sizeof(kb_shared[i]));
+   }
+   pthread_mutex_unlock(&kb_shared_lock);
+}
+
+static void
+kb_shared_pin(uint32_t handle)
+{
+   pthread_mutex_lock(&kb_shared_lock);
+   for (unsigned i = 0; i < MAX_SHARED; i++) {
+      if (!kb_shared[i].used || kb_shared[i].handle != handle)
+         continue;
+      kb_shared[i].pinned = true;
+      kb_shared[i].owner = NULL;
+      break;
    }
    pthread_mutex_unlock(&kb_shared_lock);
 }
@@ -130,9 +179,9 @@ kb_shared_dup(uint32_t handle, uint32_t *size)
 
    pthread_mutex_lock(&kb_shared_lock);
    for (unsigned i = 0; i < MAX_SHARED; i++) {
-      if (!kb_shared[i].memfd || kb_shared[i].handle != handle)
+      if (!kb_shared[i].used || kb_shared[i].handle != handle)
          continue;
-      fd = dup(kb_shared[i].memfd);
+      fd = fcntl(kb_shared[i].memfd, F_DUPFD_CLOEXEC, 3);
       if (fd >= 0 && size)
          *size = kb_shared[i].size;
       else if (fd < 0)
@@ -151,9 +200,10 @@ shared_import_fd(struct kb_ctx *c, struct kb_bo *bo, uint32_t size,
                  int src_fd, bool imported)
 {
    int ret, memfd = -1, dma = -1, dev = -1;
+   bool have_import = false, mem_same_va = false;
    void *cpu = MAP_FAILED, *gpu = MAP_FAILED;
 
-   memfd = dup(src_fd);
+   memfd = fcntl(src_fd, F_DUPFD_CLOEXEC, 3);
    if (memfd < 0)
       return -errno;
    dev = open("/dev/udmabuf", O_RDWR | O_CLOEXEC);
@@ -178,22 +228,17 @@ shared_import_fd(struct kb_ctx *c, struct kb_bo *bo, uint32_t size,
       ret = ioctl(c->base.fd, KBASE_IOCTL_MEM_IMPORT_LEGACY, &imp);
    if (ret)
       goto fail;
+   have_import = true;
+   mem_same_va = !!(imp.out.flags & BASE_MEM_SAME_VA);
    if (!(imp.out.flags & (BASE_MEM_SAME_VA | BASE_MEM_NEED_MMAP)) ||
        imp.out.va_pages != size / 4096) {
-      struct kbase_ioctl_mem_free f = {.gpu_addr = imp.out.gpu_va};
-      ioctl(c->base.fd, KBASE_IOCTL_MEM_FREE, &f);
       errno = ENOTSUP;
       goto fail;
    }
    gpu = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, c->base.fd,
               imp.out.gpu_va);
-   if (gpu == MAP_FAILED) {
-      int saved = errno;
-      struct kbase_ioctl_mem_free f = {.gpu_addr = imp.out.gpu_va};
-      ioctl(c->base.fd, KBASE_IOCTL_MEM_FREE, &f);
-      errno = saved;
+   if (gpu == MAP_FAILED)
       goto fail;
-   }
    cpu = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, memfd, 0);
    if (cpu == MAP_FAILED)
       goto fail;
@@ -202,7 +247,8 @@ shared_import_fd(struct kb_ctx *c, struct kb_bo *bo, uint32_t size,
       goto fail;
    *bo = (struct kb_bo){.ptr = cpu, .gpu_mapping = gpu, .size = size,
                         .memfd = memfd, .dmabuf = dma, .shared = true,
-                        .same_va = true, .gpu_va = (uintptr_t)gpu,
+                        .same_va = mem_same_va,
+                        .gpu_va = mem_same_va ? (uintptr_t)gpu : imp.out.gpu_va,
                         .imported = imported};
    return 0;
 
@@ -212,6 +258,10 @@ fail:
       munmap(gpu, size);
    if (cpu != MAP_FAILED)
       munmap(cpu, size);
+   if (have_import && (!mem_same_va || gpu == MAP_FAILED)) {
+      struct kbase_ioctl_mem_free f = {.gpu_addr = imp.out.gpu_va};
+      ioctl(c->base.fd, KBASE_IOCTL_MEM_FREE, &f);
+   }
    if (dma >= 0)
       close(dma);
    if (dev >= 0)
@@ -245,7 +295,25 @@ IMPORT_CMD = r'''   if (hdr->cmd == 16) {
       /* KB_IMPORT_SHARED: make another context's shared blob usable here.
        * The registry entry is keyed by the producer's blob id; the returned
        * value is this context's kbase GPU VA, which the guest's native submit
-       * will use for the reused WDDM allocation. */
+       * will use for the reused WDDM allocation.
+       *
+       * Only an imported copy satisfies this request.  A producer-only entry
+       * with the same handle must not be reused here: the guest's later cmd 4
+       * for the consumer reference would then target the producer instead of
+       * the imported copy. */
+      for (unsigned i = 0; i < MAX_BO; i++) {
+         struct kb_bo *bo = &c->bo[i];
+         if (!bo->ptr || !bo->imported || bo->handle != q->handle)
+            continue;
+         if (q->size && q->size != bo->size) {
+            r->status = -EINVAL;
+            return 0;
+         }
+         r->handle = bo->handle;
+         r->size = bo->size;
+         r->value = bo->gpu_va;
+         return 0;
+      }
       uint32_t want = q->size, size = 0;
       int fd = kb_shared_dup(q->handle, &size);
       if (fd < 0) {
@@ -253,7 +321,8 @@ IMPORT_CMD = r'''   if (hdr->cmd == 16) {
          return 0;
       }
       if ((want && want != size) || !size || (size & 4095) ||
-          size > c->limit || size > c->limit - c->allocated) {
+          size > c->limit || c->allocated > c->limit ||
+          size > c->limit - c->allocated) {
          close(fd);
          r->status = -EINVAL;
          return 0;
@@ -287,9 +356,11 @@ def main() -> int:
     path = pathlib.Path(sys.argv[1]) / "src/drm/mali_kbase_renderer.c"
     text = path.read_text()
 
-    if "KB_IMPORT_SHARED" in text:
+    if VERSION_MARKER in text:
         print("already patched")
         return 0
+    require("KB_IMPORT_SHARED" not in text,
+            "an older KB_IMPORT_SHARED patch is present; regenerate from the original source")
 
     text = sub_idem(text, "#include <poll.h>\n", "#include <poll.h>\n#include <pthread.h>\n", "pthread include")
 
@@ -304,9 +375,65 @@ def main() -> int:
 
     text = sub_idem(
         text,
-        "   munmap(bo->ptr, bo->size);\n   if (bo->shared) {\n",
-        "   munmap(bo->ptr, bo->size);\n   if (bo->shared) {\n      if (!bo->imported)\n         kb_shared_unregister(bo->handle);\n",
+        "   munmap(bo->ptr, bo->size);\n"
+        "   if (bo->shared) {\n"
+        "      munmap(bo->gpu_mapping, bo->size);\n"
+        "      if (bo->dmabuf >= 0) close(bo->dmabuf);\n"
+        "      close(bo->memfd);\n"
+        "      if (bo->shadow && !bo->same_va) {\n"
+        "         struct kbase_ioctl_mem_free f = {.gpu_addr = bo->gpu_va};\n"
+        "         ioctl(fd, KBASE_IOCTL_MEM_FREE, &f);\n"
+        "      }\n"
+        "   }\n",
+        "   munmap(bo->ptr, bo->size);\n"
+        "   if (bo->shared) {\n"
+        "      if (!bo->imported && !bo->exported)\n"
+        "         kb_shared_unregister(bo->handle);\n"
+        "      munmap(bo->gpu_mapping, bo->size);\n"
+        "      if (bo->dmabuf >= 0) close(bo->dmabuf);\n"
+        "      close(bo->memfd);\n"
+        "      if (!bo->same_va) {\n"
+        "         struct kbase_ioctl_mem_free f = {.gpu_addr = bo->gpu_va};\n"
+        "         ioctl(fd, KBASE_IOCTL_MEM_FREE, &f);\n"
+        "      }\n"
+        "   }\n",
         "free_bo unregister")
+
+    text = sub_idem(
+        text,
+        "   struct kb_bo *bo = NULL;\n"
+        "   for (unsigned i = 0; i < MAX_BO; i++)\n"
+        "      if (c->bo[i].ptr && c->bo[i].handle == q->handle) { bo = &c->bo[i]; break; }\n"
+        "   if (!bo) { r->status = -ENOENT; return 0; }\n",
+        "   struct kb_bo *bo = NULL, *imported = NULL;\n"
+        "   /* A same-context producer and consumer import share one handle.\n"
+        "    * Prefer the imported copy so cmd 4 retires the consumer reference\n"
+        "    * and leaves the producer entry (and registry pin) alone. */\n"
+        "   for (unsigned i = 0; i < MAX_BO; i++) {\n"
+        "      if (!c->bo[i].ptr || c->bo[i].handle != q->handle)\n"
+        "         continue;\n"
+        "      if (!bo)\n"
+        "         bo = &c->bo[i];\n"
+        "      if (c->bo[i].imported) {\n"
+        "         imported = &c->bo[i];\n"
+        "         break;\n"
+        "      }\n"
+        "   }\n"
+        "   if (imported)\n"
+        "      bo = imported;\n"
+        "   if (!bo) { r->status = -ENOENT; return 0; }\n",
+        "prefer imported on handle lookup")
+
+    text = sub_idem(
+        text,
+        "   if (hdr->cmd == 0) { r->value = c->gpu_id; r->size = c->allocated; return 0; }\n",
+        "   if (hdr->cmd == 0) {\n"
+        "      r->handle = KB_CAP_IMPORT_SHARED;\n"
+        "      r->value = c->gpu_id;\n"
+        "      r->size = c->allocated;\n"
+        "      return 0;\n"
+        "   }\n",
+        "KB_INFO capability")
 
     text = sub_idem(
         text,
@@ -316,35 +443,114 @@ def main() -> int:
 
     text = sub_idem(
         text,
+        "      if (!q->size || q->size > c->limit || (q->size & 4095) ||\n"
+        "          q->size > c->limit - c->allocated) { r->status = -EINVAL; return 0; }\n",
+        "      if (!q->size || q->size > c->limit || c->allocated > c->limit ||\n"
+        "          (q->size & 4095) || q->size > c->limit - c->allocated) { r->status = -EINVAL; return 0; }\n",
+        "alloc budget")
+
+    text = sub_idem(
+        text,
         "      if (slot == c->bo_limit || c->next_handle == UINT32_MAX) { r->status = -ENOSPC; return 0; }\n",
-        "      if (slot == c->bo_limit) { r->status = -ENOSPC; return 0; }\n",
+        "      if (slot == c->bo_limit) { r->status = -ENOSPC; return 0; }\n"
+        "      uint32_t new_handle = kb_alloc_handle();\n"
+        "      if (!new_handle) { r->status = -ENOSPC; return 0; }\n",
         "global handle capacity")
 
     text = sub_idem(
         text,
-        "         c->bo[slot].handle = ++c->next_handle;\n         c->allocated += q->size;\n         r->handle = c->next_handle; r->size = q->size;\n",
-        "         c->bo[slot].handle = kb_alloc_handle();\n         c->allocated += q->size;\n         if (hdr->cmd == 5 || (hdr->cmd == 11 && q->reserved)) {\n            int reg_ret = kb_shared_register(c->bo[slot].handle,\n                                             c->bo[slot].size,\n                                             c->bo[slot].memfd);\n            if (reg_ret) {\n               c->allocated -= q->size;\n               free_bo(base->fd, &c->bo[slot]);\n               r->status = reg_ret;\n               return 0;\n            }\n         }\n         r->handle = c->bo[slot].handle; r->size = q->size;\n",
+        "         c->bo[slot].handle = ++c->next_handle;\n"
+        "         c->allocated += q->size;\n"
+        "         r->handle = c->next_handle; r->size = q->size;\n",
+        "         c->bo[slot].handle = new_handle;\n"
+        "         c->allocated += q->size;\n"
+        "         if (hdr->cmd == 5 || (hdr->cmd == 11 && q->reserved)) {\n"
+        "            int reg_ret = kb_shared_register(c, new_handle,\n"
+        "                                             c->bo[slot].size,\n"
+        "                                             c->bo[slot].memfd);\n"
+        "            if (reg_ret) {\n"
+        "               c->allocated -= q->size;\n"
+        "               free_bo(base->fd, &c->bo[slot]);\n"
+        "               r->status = reg_ret;\n"
+        "               return 0;\n"
+        "            }\n"
+        "         }\n"
+        "         r->handle = c->bo[slot].handle; r->size = q->size;\n",
         "shared alloc registry")
 
     text = sub_idem(
         text,
-        "      c->bo[slot] = (struct kb_bo){.ptr = ptr, .size = q->size, .handle = ++c->next_handle};\n      c->allocated += q->size;\n      r->handle = c->next_handle; r->size = q->size;\n",
-        "      c->bo[slot] = (struct kb_bo){.ptr = ptr, .size = q->size, .handle = kb_alloc_handle()};\n      c->allocated += q->size;\n      r->handle = c->bo[slot].handle; r->size = q->size;\n",
+        "      c->bo[slot] = (struct kb_bo){.ptr = ptr, .size = q->size, .handle = ++c->next_handle};\n"
+        "      c->allocated += q->size;\n"
+        "      r->handle = c->next_handle; r->size = q->size;\n",
+        "      c->bo[slot] = (struct kb_bo){.ptr = ptr, .size = q->size, .handle = new_handle};\n"
+        "      c->allocated += q->size;\n"
+        "      r->handle = c->bo[slot].handle; r->size = q->size;\n",
         "regular alloc global handle")
 
     text = sub_idem(
         text,
-        "      for (unsigned i = 0; i < MAX_BO; i++) {\n         struct kb_bo *bo = &c->bo[i];\n         if (!bo->ptr || !bo->shared || bo->handle != id) continue;\n         if (bo->exported || size != bo->size || flags != VIRGL_RENDERER_BLOB_FLAG_USE_MAPPABLE)\n",
-        "      for (unsigned i = 0; i < MAX_BO; i++) {\n         struct kb_bo *bo = &c->bo[i];\n         if (!bo->ptr || !bo->shared || bo->handle != id || bo->exported) continue;\n         if (size != bo->size || flags != VIRGL_RENDERER_BLOB_FLAG_USE_MAPPABLE)\n",
-        "blob prefer unexported")
+        "      for (unsigned i = 0; i < MAX_BO; i++) {\n"
+        "         struct kb_bo *bo = &c->bo[i];\n"
+        "         if (!bo->ptr || !bo->shared || bo->handle != id) continue;\n"
+        "         if (bo->exported || size != bo->size || flags != VIRGL_RENDERER_BLOB_FLAG_USE_MAPPABLE)\n"
+        "            return -EINVAL;\n"
+        "         int fd = fcntl(bo->memfd, F_DUPFD_CLOEXEC, 3);\n"
+        "         if (fd < 0) return -errno;\n"
+        "         out->type = VIRGL_RESOURCE_FD_SHM; out->u.fd = fd;\n"
+        "         out->map_info = VIRGL_RENDERER_MAP_CACHE_CACHED;\n"
+        "         bo->exported = true; return 0;\n"
+        "      }\n"
+        "      return -ENOENT;\n",
+        "      struct kb_bo *bo = NULL;\n"
+        "      bool saw_match = false;\n"
+        "      for (unsigned i = 0; i < MAX_BO; i++) {\n"
+        "         struct kb_bo *candidate = &c->bo[i];\n"
+        "         if (!candidate->ptr || !candidate->shared ||\n"
+        "             candidate->handle != id)\n"
+        "            continue;\n"
+        "         saw_match = true;\n"
+        "         if (size != candidate->size ||\n"
+        "             flags != VIRGL_RENDERER_BLOB_FLAG_USE_MAPPABLE)\n"
+        "            continue;\n"
+        "         /* In a context that holds both the producer and a consumer\n"
+        "          * import, the imported copy is the one this resource belongs to.\n"
+        "          * Prefer it, and among equals prefer a not-yet-exported copy. */\n"
+        "         if (!bo ||\n"
+        "             (candidate->imported && !bo->imported) ||\n"
+        "             (candidate->imported == bo->imported &&\n"
+        "              !candidate->exported && bo->exported))\n"
+        "            bo = candidate;\n"
+        "      }\n"
+        "      if (!bo)\n"
+        "         return saw_match ? -EINVAL : -ENOENT;\n"
+        "      int fd = fcntl(bo->memfd, F_DUPFD_CLOEXEC, 3);\n"
+        "      if (fd < 0) return -errno;\n"
+        "      out->type = VIRGL_RESOURCE_FD_SHM; out->u.fd = fd;\n"
+        "      out->map_info = VIRGL_RENDERER_MAP_CACHE_CACHED;\n"
+        "      kb_shared_pin(bo->handle);\n"
+        "      bo->exported = true; return 0;\n",
+        "blob multi-export prefer imported")
+
+    text = sub_idem(
+        text,
+        "   for (unsigned i = 0; i < MAX_BO; i++)\n"
+        "      if (c->bo[i].ptr) free_bo(c->base.fd, &c->bo[i]);\n"
+        "   munmap(c->tracking, 4096);\n",
+        "   for (unsigned i = 0; i < MAX_BO; i++)\n"
+        "      if (c->bo[i].ptr) free_bo(c->base.fd, &c->bo[i]);\n"
+        "   kb_shared_unregister_owner(c);\n"
+        "   munmap(c->tracking, 4096);\n",
+        "destroy owner cleanup")
 
     text = sub_idem(
         text,
         '   {"KB_ALIAS", command, sizeof(struct kb_req)},\n',
-        '   {"KB_ALIAS", command, sizeof(struct kb_req)},\n   {"KB_IMPORT_SHARED", command, sizeof(struct kb_req)},\n',
+        '   {"KB_ALIAS", command, sizeof(struct kb_req)},\n'
+        '   {"KB_IMPORT_SHARED", command, sizeof(struct kb_req)},\n',
         "dispatch entry")
 
-    path.write_text(text)
+    path.write_text(text, encoding="utf-8", newline="\n")
     print(f"patched {path}")
     return 0
 

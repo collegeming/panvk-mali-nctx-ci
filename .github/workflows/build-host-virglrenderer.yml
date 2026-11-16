@@ -24,6 +24,15 @@ jobs:
           sudo apt-get clean
           sudo docker image prune -a -f || true
           df -h /
+      - name: Create swap headroom
+        run: |
+          set -eux
+          sudo fallocate -l 4G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=4096
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile || true
+          sudo swapon /swapfile || true
+          free -h
+          df -h /
       - name: Install repo tool
         run: |
           set -eux
@@ -91,7 +100,7 @@ jobs:
           lunch aosp_arm64 trunk_staging eng
           free -h
           df -h /
-          ALLOW_MISSING_DEPENDENCIES=true TARGET_BUILD_UNBUNDLED=true m libvirglrenderer -j2
+          ALLOW_MISSING_DEPENDENCIES=true TARGET_BUILD_UNBUNDLED=true m libvirglrenderer -j1
           free -h
           df -h /
       - name: Collect artifact
