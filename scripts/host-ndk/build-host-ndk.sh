@@ -33,6 +33,18 @@ grep -q 'KB_IMPORT_SHARED' "$V/src/drm/mali_kbase_renderer.c"
 grep -q 'kb_shared_register' "$V/src/drm/mali_kbase_renderer.c"
 grep -q 'KB_IMPORT_SHARED_MIN' "$V/src/drm/mali_kbase_renderer.c"
 
+# Log-only probes for the resource attach path (P0).  Must stay after the
+# shared-import patch so the KB_IMPORT_SHARED path is preserved unchanged.
+test -f "$REPO/patches/patch_host_attach_diag.py"
+python3 "$REPO/patches/patch_host_attach_diag.py" "$V"
+grep -q 'ATTACH-DIAG:' "$V/src/virgl_resource.c"
+grep -q 'ATTACH-DIAG: create_blob' "$V/src/virglrenderer.c"
+
+# The ComponentError string belongs to crosvm/rutabaga, not virglrenderer.
+# Record whether this tree contains it so the log location is unambiguous.
+echo '--- ComponentError grep (virglrenderer tree) ---'
+grep -rn 'ComponentError' "$V/src" || echo 'ComponentError: not present in virglrenderer'
+
 
 curl -fsSL --retry 3 -o epoxy.tgz https://github.com/anholt/libepoxy/archive/refs/tags/1.5.10.tar.gz
 tar xzf epoxy.tgz
