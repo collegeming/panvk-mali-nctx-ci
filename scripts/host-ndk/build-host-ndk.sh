@@ -27,6 +27,16 @@ V=$WORK/virglrenderer-e58441fc6fa6ce73e6545882b43c8c807fe22a11
 test -f "$V/src/drm/mali_kbase_renderer.c"
 python3 "$HERE/patch_host_probe.py" "$V"
 
+# Classic-3D backing upload: attach() keeps the iovec pages instead of
+# discarding them, and KB_RES_UPLOAD (ccmd 17) copies them into a kbase BO.
+# Applied after the probe patch so both anchor sets stay independent.
+REPO=$(cd "$HERE/../.." && pwd)
+test -f "$REPO/patches/patch_host_attach_upload.py"
+python3 "$REPO/patches/patch_host_attach_upload.py" "$V"
+grep -q KB_RES_UPLOAD "$V/src/drm/mali_kbase_renderer.c"
+grep -q MAX_RES_TRACK "$V/src/drm/mali_kbase_renderer.c"
+grep -q kb_res_snapshot "$V/src/drm/mali_kbase_renderer.c"
+
 
 curl -fsSL --retry 3 -o epoxy.tgz https://github.com/anholt/libepoxy/archive/refs/tags/1.5.10.tar.gz
 tar xzf epoxy.tgz
