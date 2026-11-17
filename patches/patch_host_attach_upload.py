@@ -177,22 +177,20 @@ attach(struct virgl_context *v, struct virgl_resource *res)
 
    struct kb_res_track *t = kb_res_slot(c, res->res_id);
    if (!t) {
-      __android_log_print(ANDROID_LOG_WARN, "kbattach",
-                          "attach: res=%u no slot for iov_count=%d",
-                          res->res_id, res->iov_count);
+      fprintf(stderr, "kbattach: attach: res=%u no slot for iov_count=%d\n",
+              res->res_id, res->iov_count);
       return;
    }
 
    int ret = kb_res_snapshot(t, res->res_id, res->iov, res->iov_count);
    if (ret) {
-      __android_log_print(ANDROID_LOG_WARN, "kbattach",
-                          "attach: res=%u snapshot failed ret=%d", res->res_id, ret);
+      fprintf(stderr, "kbattach: attach: res=%u snapshot failed ret=%d\n",
+              res->res_id, ret);
       return;
    }
 
-   __android_log_print(ANDROID_LOG_INFO, "kbattach",
-                       "attach: res=%u iov_count=%d total=%llu",
-                       res->res_id, t->iov_count, (unsigned long long)t->size);
+   fprintf(stderr, "kbattach: attach: res=%u iov_count=%d total=%llu\n",
+           res->res_id, t->iov_count, (unsigned long long)t->size);
 }
 
 '''
@@ -248,9 +246,8 @@ UPLOAD_CMD = r'''   if (hdr->cmd == 17) {
       }
 
       r->size = (uint32_t)done;
-      __android_log_print(ANDROID_LOG_INFO, "kbattach",
-                          "upload: res=%u -> bo=%u off=%u bytes=%llu",
-                          res_id, q->handle, q->offset, (unsigned long long)done);
+      fprintf(stderr, "kbattach: upload: res=%u -> bo=%u off=%u bytes=%llu\n",
+              res_id, q->handle, q->offset, (unsigned long long)done);
       return 0;
    }
 '''
@@ -325,12 +322,16 @@ def main() -> int:
     )
 
     # 6. Dispatch entry.  The table is index-addressed, so the new command must
-    #    be appended and the array size grows with it.
+    #    be appended and the array size grows with it.  Anchor on KB_ALIAS: the
+    #    shared-import patch (a separate branch) appends KB_IMPORT_SHARED after
+    #    it, so anchoring on the last entry would only match one of the two
+    #    trees.  KB_RES_UPLOAD therefore becomes ccmd 17 on main and ccmd 18 on
+    #    the shared-import branch; the guest must use the value the host reports.
     text = sub_idem(
         text,
-        """   {"KB_IMPORT_SHARED", command, sizeof(struct kb_req)},
+        """   {"KB_ALIAS", command, sizeof(struct kb_req)},
 };""",
-        """   {"KB_IMPORT_SHARED", command, sizeof(struct kb_req)},
+        """   {"KB_ALIAS", command, sizeof(struct kb_req)},
    {"KB_RES_UPLOAD", command, sizeof(struct kb_req)},
 };""",
         "dispatch KB_RES_UPLOAD entry",
