@@ -265,16 +265,16 @@ def main() -> int:
     require("KB_RES_UPLOAD" not in text, "already patched")
     require("MAX_RES_TRACK" not in text, "another res-track patch is present")
 
-    # 1. Tracking array on the context.
+    # 1. Tracking array on the context.  Anchor on the queue array: the probe
+    #    patch appends n_groups/groups after `alias[32]`, so anchoring on the
+    #    struct tail would only match when this patch runs first.
     text = sub_idem(
         text,
-        """   uint32_t next_queue;
-   struct { void *ptr; uint64_t size; } alias[32];
-};""",
-        """   uint32_t next_queue;
-   struct { void *ptr; uint64_t size; } alias[32];
-   struct kb_res_track res[MAX_RES_TRACK];
-};""",
+        """   } queue[32];
+   uint32_t next_queue;""",
+        """   } queue[32];
+   uint32_t next_queue;
+   struct kb_res_track res[MAX_RES_TRACK];""",
         "kb_ctx res tracking field",
     )
 
