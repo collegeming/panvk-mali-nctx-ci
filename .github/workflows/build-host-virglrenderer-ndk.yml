@@ -1,14 +1,21 @@
 name: build-host-virglrenderer-ndk
 on:
   workflow_dispatch:
+    inputs:
+      fix_kbase_evt:
+        description: 'Apply patch_host_kbase_evt.py (A1 group-error decode + A2 shadow-BO live mapping); emit fix-kbase-evt.patch evidence'
+        required: false
+        default: false
+        type: boolean
   push:
-    branches: [main, feat/kbase-shared-import, diag/host-attach-idempotent, idem/host-attach-noop]
+    branches: [main, feat/kbase-shared-import, diag/host-attach-idempotent, idem/host-attach-noop, idem/host-attach-noop-hardened, fix/host-kbase-evt]
     paths:
       - '.github/workflows/build-host-virglrenderer-ndk.yml'
       - 'patches/patch_host_kbase_import.py'
       - 'patches/patch_host_min_import.py'
       - 'patches/patch_host_attach_diag.py'
       - 'patches/patch_host_attach_noop.py'
+      - 'patches/patch_host_kbase_evt.py'
       - 'scripts/host-ndk/**'
 permissions:
   contents: read
@@ -19,6 +26,8 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    env:
+      FIX_KBASE_EVT: ${{ inputs.fix_kbase_evt && '1' || '0' }}
     steps:
       - name: Checkout CI scripts
         uses: actions/checkout@v4

@@ -52,6 +52,30 @@ test -f "$REPO/patches/patch_host_attach_noop.py"
 python3 "$REPO/patches/patch_host_attach_noop.py" "$V"
 grep -q 'ATTACH-DIAG: noop' "$V/src/virgl_resource.c"
 
+# fix-kbase-evt (A1+A2): decode the CS group-error notification that op3
+# used to read and drop, and route shadow-BO copy accesses (cmd2/cmd3)
+# through the live kbase mapping instead of the stale memfd copy.
+# Task evidence: hang with CS_FATAL.EXCEPTION_TYPE 0x48 (CS_BUS_FAULT),
+# EXCEPTION_DATA 0x9c00010, "queue not bound when handling an error event".
+if [ "${FIX_KBASE_EVT:-0}" = "1" ]; then
+  pre="$WORK/kbase-evt-pre"
+  mkdir -p "$pre/src/drm"
+  cp "$V/src/drm/kbase_transport_queue.h" "$pre/src/drm/kbase_transport_queue.h"
+  cp "$V/src/drm/mali_kbase_renderer.c" "$pre/src/drm/mali_kbase_renderer.c"
+  python3 "$REPO/patches/patch_host_kbase_evt.py" "$V"
+  grep -q 'kbase_evt: type=' "$V/src/drm/kbase_transport_queue.h"
+  grep -q 'bo->shadow ? (uint8_t *)bo->gpu_mapping' "$V/src/drm/mali_kbase_renderer.c"
+  diff -u --label a/src/drm/kbase_transport_queue.h \
+            --label b/src/drm/kbase_transport_queue.h \
+            "$pre/src/drm/kbase_transport_queue.h" "$V/src/drm/kbase_transport_queue.h" \
+            > "$OUT/fix-kbase-evt.patch" || test $? -eq 1
+  diff -u --label a/src/drm/mali_kbase_renderer.c \
+            --label b/src/drm/mali_kbase_renderer.c \
+            "$pre/src/drm/mali_kbase_renderer.c" "$V/src/drm/mali_kbase_renderer.c" \
+            >> "$OUT/fix-kbase-evt.patch" || test $? -eq 1
+  test -s "$OUT/fix-kbase-evt.patch"
+fi
+
 
 curl -fsSL --retry 3 -o epoxy.tgz https://github.com/anholt/libepoxy/archive/refs/tags/1.5.10.tar.gz
 tar xzf epoxy.tgz
@@ -169,6 +193,13 @@ $CC -shared -fPIC -O2 -g0 \
 
 readelf -h "$OUT/libvirglrenderer.so" | grep -E 'Machine|Class'
 readelf -d "$OUT/libvirglrenderer.so" | grep -E 'SONAME|NEEDED'
-strings "$OUT/libvirglrenderer.so" | grep -E 'mali_kbase|VKR_TEST_KBASE|drm_renderer' | sort -u > "$OUT/mali-strings.txt" || true
+strings "$OUT/libvirglrenderer.so" | grep -E 'mali_kbase|VKR_TEST_KBASE|drm_renderer|kbase_evt' | sort -u > "$OUT/mali-strings.txt" || true
 cat "$OUT/mali-strings.txt"
 sha256sum "$OUT/libvirglrenderer.so" > "$OUT/SHA256SUMS"
+printf 'inputs: fix_kbase_evt=%s\n' "${FIX_KBASE_EVT:-0}" > "$OUT/BUILD-INFO.txt"
+printf 'source: MollySophia/virglrenderer@e58441fc6fa6ce73e6545882b43c8c807fe22a11 (tarball)\n' >> "$OUT/BUILD-INFO.txt"
+printf 'chain: patch_host_probe,patch_host_min_import,patch_host_attach_diag,patch_host_attach_noop\n' >> "$OUT/BUILD-INFO.txt"
+if [ "${FIX_KBASE_EVT:-0}" = "1" ]; then
+  printf 'chain: +patch_host_kbase_evt\n' >> "$OUT/BUILD-INFO.txt"
+  sha256sum "$OUT/fix-kbase-evt.patch" >> "$OUT/SHA256SUMS"
+fi
