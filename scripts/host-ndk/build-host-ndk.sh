@@ -63,8 +63,8 @@ if [ "${FIX_KBASE_EVT:-0}" = "1" ]; then
   cp "$V/src/drm/kbase_transport_queue.h" "$pre/src/drm/kbase_transport_queue.h"
   cp "$V/src/drm/mali_kbase_renderer.c" "$pre/src/drm/mali_kbase_renderer.c"
   python3 "$REPO/patches/patch_host_kbase_evt.py" "$V"
-  grep -q 'kbase_evt: type=' "$V/src/drm/kbase_transport_queue.h"
-  grep -q 'bo->shadow ? (uint8_t *)bo->gpu_mapping' "$V/src/drm/mali_kbase_renderer.c"
+  grep -Fq 'kbase_evt: type=' "$V/src/drm/kbase_transport_queue.h"
+  grep -Fq 'bo->shadow ? (uint8_t *)bo->gpu_mapping' "$V/src/drm/mali_kbase_renderer.c"
   diff -u --label a/src/drm/kbase_transport_queue.h \
             --label b/src/drm/kbase_transport_queue.h \
             "$pre/src/drm/kbase_transport_queue.h" "$V/src/drm/kbase_transport_queue.h" \
