@@ -33,6 +33,12 @@ grep -q 'KB_IMPORT_SHARED' "$V/src/drm/mali_kbase_renderer.c"
 grep -q 'kb_shared_register' "$V/src/drm/mali_kbase_renderer.c"
 grep -q 'KB_IMPORT_SHARED_MIN' "$V/src/drm/mali_kbase_renderer.c"
 
+# Reclaim the shared-blob registry by refcount so a long session cannot
+# exhaust it (MAX_SHARED 1024) and turn every allocation into ENOSPC.
+test -f "$REPO/patches/patch_host_shared_refcount.py"
+python3 "$REPO/patches/patch_host_shared_refcount.py" "$V"
+grep -q 'hostkb-shared-refcount\|kb_shared_unref' "$V/src/drm/mali_kbase_renderer.c"
+
 # Log-only probes for the resource attach path (P0).  Must stay after the
 # shared-import patch so the KB_IMPORT_SHARED path is preserved unchanged.
 test -f "$REPO/patches/patch_host_attach_diag.py"
